@@ -1,0 +1,220 @@
+# Semantic Model for Illuminate Analytics
+# Defines tables, columns, and verified queries for Cortex Analyst
+
+name: illuminate_analytics
+version: 1.0.0
+description: "Semantic model for Anthology Illuminate educational data"
+
+tables:
+  # CDM_LMS Tables
+  - name: CDM_LMS.COURSE
+    description: "Course catalog with enrollment and instructor information"
+    columns:
+      - name: COURSE_ID
+        description: "Unique course identifier"
+        data_type: VARCHAR
+      - name: COURSE_NAME
+        description: "Full name of the course"
+        data_type: VARCHAR
+      - name: TERM
+        description: "Academic term (e.g., Fall 2024)"
+        data_type: VARCHAR
+      - name: DEPARTMENT
+        description: "Academic department offering the course"
+        data_type: VARCHAR
+      - name: INSTRUCTOR_NAME
+        description: "Name of the primary instructor"
+        data_type: VARCHAR
+      - name: ENROLLMENT_COUNT
+        description: "Number of enrolled students"
+        data_type: INTEGER
+
+  - name: CDM_LMS.PERSON_COURSE
+    description: "Student-course enrollment mappings with roles and status"
+    columns:
+      - name: PERSON_ID
+        description: "Unique student/user identifier"
+        data_type: VARCHAR
+      - name: COURSE_ID
+        description: "Course identifier"
+        data_type: VARCHAR
+      - name: ROLE
+        description: "User role in course (Student, Instructor, TA)"
+        data_type: VARCHAR
+      - name: ENROLLMENT_STATUS
+        description: "Enrollment status (Active, Dropped, Completed)"
+        data_type: VARCHAR
+
+  - name: CDM_LMS.GRADE
+    description: "Grade records for course assessments"
+    columns:
+      - name: GRADE_ID
+        description: "Unique grade record identifier"
+        data_type: VARCHAR
+      - name: COURSE_ID
+        description: "Course identifier"
+        data_type: VARCHAR
+      - name: PERSON_ID
+        description: "Student identifier"
+        data_type: VARCHAR
+      - name: GRADE_VALUE
+        description: "Letter grade (A, B+, etc.)"
+        data_type: VARCHAR
+      - name: GRADE_POINTS
+        description: "Numeric grade points (0.0 - 4.0)"
+        data_type: FLOAT
+
+  - name: CDM_LMS.ASSIGNMENT
+    description: "Assignment details with submission statistics"
+    columns:
+      - name: ASSIGNMENT_ID
+        description: "Unique assignment identifier"
+        data_type: VARCHAR
+      - name: COURSE_ID
+        description: "Course identifier"
+        data_type: VARCHAR
+      - name: TITLE
+        description: "Assignment title"
+        data_type: VARCHAR
+      - name: DUE_DATE
+        description: "Assignment due date"
+        data_type: DATE
+      - name: SUBMISSIONS
+        description: "Number of student submissions"
+        data_type: INTEGER
+      - name: AVG_SCORE
+        description: "Average score on assignment"
+        data_type: FLOAT
+
+  # CDM_SIS Tables
+  - name: CDM_SIS.STUDENT
+    description: "Student demographic and enrollment information"
+    columns:
+      - name: STUDENT_ID
+        description: "Unique student identifier"
+        data_type: VARCHAR
+      - name: FIRST_NAME
+        description: "Student first name"
+        data_type: VARCHAR
+      - name: LAST_NAME
+        description: "Student last name"
+        data_type: VARCHAR
+      - name: EMAIL
+        description: "Student email address"
+        data_type: VARCHAR
+      - name: ENROLLMENT_DATE
+        description: "Date of initial enrollment"
+        data_type: DATE
+      - name: STATUS
+        description: "Current status (Active, Graduated, Withdrawn)"
+        data_type: VARCHAR
+
+  - name: CDM_SIS.PROGRAM
+    description: "Academic programs and degrees"
+    columns:
+      - name: PROGRAM_ID
+        description: "Unique program identifier"
+        data_type: VARCHAR
+      - name: PROGRAM_NAME
+        description: "Full program name"
+        data_type: VARCHAR
+      - name: DEGREE_TYPE
+        description: "Degree type (Bachelor, Master, Doctorate)"
+        data_type: VARCHAR
+      - name: DEPARTMENT
+        description: "Department offering the program"
+        data_type: VARCHAR
+
+  # CDM_TLM Tables
+  - name: CDM_TLM.ACTIVITY
+    description: "User activity and interaction events"
+    columns:
+      - name: ACTIVITY_ID
+        description: "Unique activity identifier"
+        data_type: VARCHAR
+      - name: PERSON_ID
+        description: "User identifier"
+        data_type: VARCHAR
+      - name: ACTIVITY_TYPE
+        description: "Type of activity (login, content_view, assignment_submit)"
+        data_type: VARCHAR
+      - name: TIMESTAMP
+        description: "Activity timestamp"
+        data_type: TIMESTAMP
+      - name: DURATION_SECONDS
+        description: "Duration of activity in seconds"
+        data_type: INTEGER
+
+  - name: CDM_TLM.SESSION
+    description: "User session data"
+    columns:
+      - name: SESSION_ID
+        description: "Unique session identifier"
+        data_type: VARCHAR
+      - name: PERSON_ID
+        description: "User identifier"
+        data_type: VARCHAR
+      - name: START_TIME
+        description: "Session start time"
+        data_type: TIMESTAMP
+      - name: END_TIME
+        description: "Session end time"
+        data_type: TIMESTAMP
+      - name: DEVICE_TYPE
+        description: "Device type (Desktop, Mobile, Tablet)"
+        data_type: VARCHAR
+
+# Verified queries - pre-validated SQL for common questions
+verified_queries:
+  - name: "Average grade by course"
+    question: "What is the average grade for each course?"
+    sql: |
+      SELECT c.COURSE_NAME, AVG(g.GRADE_POINTS) as avg_grade, COUNT(*) as num_grades
+      FROM CDM_LMS.GRADE g
+      JOIN CDM_LMS.COURSE c ON g.COURSE_ID = c.COURSE_ID
+      GROUP BY c.COURSE_NAME
+      ORDER BY avg_grade DESC
+
+  - name: "Course enrollment counts"
+    question: "How many students are enrolled in each course?"
+    sql: |
+      SELECT COURSE_NAME, ENROLLMENT_COUNT
+      FROM CDM_LMS.COURSE
+      ORDER BY ENROLLMENT_COUNT DESC
+
+  - name: "Student retention by cohort"
+    question: "What is the retention rate by enrollment year?"
+    sql: |
+      SELECT
+        YEAR(ENROLLMENT_DATE) as cohort_year,
+        COUNT(*) as total_students,
+        SUM(CASE WHEN STATUS = 'Active' THEN 1 ELSE 0 END) as retained,
+        ROUND(SUM(CASE WHEN STATUS = 'Active' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 1) as retention_rate
+      FROM CDM_SIS.STUDENT
+      GROUP BY YEAR(ENROLLMENT_DATE)
+      ORDER BY cohort_year DESC
+
+  - name: "Daily active users"
+    question: "How many users are active each day?"
+    sql: |
+      SELECT
+        DATE(TIMESTAMP) as activity_date,
+        COUNT(DISTINCT PERSON_ID) as daily_active_users
+      FROM CDM_TLM.ACTIVITY
+      GROUP BY DATE(TIMESTAMP)
+      ORDER BY activity_date DESC
+      LIMIT 30
+
+  - name: "At-risk students"
+    question: "Which students are at risk based on engagement?"
+    sql: |
+      SELECT
+        a.PERSON_ID,
+        MAX(a.TIMESTAMP) as last_activity,
+        DATEDIFF(day, MAX(a.TIMESTAMP), CURRENT_DATE()) as days_inactive,
+        COUNT(*) as total_activities
+      FROM CDM_TLM.ACTIVITY a
+      GROUP BY a.PERSON_ID
+      HAVING days_inactive > 7
+      ORDER BY days_inactive DESC
+      LIMIT 50

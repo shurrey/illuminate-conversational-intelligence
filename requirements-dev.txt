@@ -1,0 +1,21 @@
+# Development and testing dependencies
+# Install with: pip install -r requirements-dev.txt
+
+# Testing
+pytest>=7.0
+pytest-asyncio>=0.21
+pytest-cov>=4.0
+pytest-mock>=3.10
+pytest-env>=1.0
+
+# HTTP testing
+httpx>=0.24
+respx>=0.20
+
+# Code quality
+black>=23.0
+ruff>=0.1
+mypy>=1.0
+
+# Pre-commit hooks
+pre-commit>=3.0
