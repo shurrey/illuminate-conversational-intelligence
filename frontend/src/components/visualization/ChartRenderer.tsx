@@ -55,9 +55,9 @@ export function ChartRenderer({
         }
       >
         <Plot
-          data={data}
-          layout={layout}
-          config={PLOTLY_CONFIG}
+          data={data as any}
+          layout={layout as any}
+          config={PLOTLY_CONFIG as any}
           style={{ width: '100%' }}
           useResizeHandler
         />

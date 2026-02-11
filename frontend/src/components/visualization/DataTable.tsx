@@ -2,7 +2,7 @@
  * DataTable - Renders tabular data with sorting.
  */
 
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 
 interface TableData {
   rows: Record<string, unknown>[];

@@ -2,14 +2,14 @@
  * Header - Navigation and user info.
  */
 
-import React from 'react';
 import { authService } from '../../services/authService';
 
 interface HeaderProps {
   onMenuClick: () => void;
+  onLogout?: () => void;
 }
 
-export function Header({ onMenuClick }: HeaderProps) {
+export function Header({ onMenuClick, onLogout }: HeaderProps) {
   const user = authService.getUser();
 
   return (
@@ -55,12 +55,20 @@ export function Header({ onMenuClick }: HeaderProps) {
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 bg-gray-200 rounded-full flex items-center justify-center">
                 <span className="text-sm font-medium text-gray-600">
-                  {user.name.charAt(0).toUpperCase()}
+                  {user.name?.charAt(0).toUpperCase() || 'U'}
                 </span>
               </div>
               <span className="hidden sm:block text-sm text-gray-700">
                 {user.name}
               </span>
+              {onLogout && (
+                <button
+                  onClick={onLogout}
+                  className="ml-2 px-3 py-1 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md"
+                >
+                  Logout
+                </button>
+              )}
             </div>
           )}
         </div>

@@ -4,7 +4,6 @@
  * Currently focused on CDM_LMS (Blackboard Learn) data only.
  */
 
-import React from 'react';
 
 interface SidebarProps {
   onClose: () => void;

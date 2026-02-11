@@ -10,16 +10,26 @@
     "cdk": "cdk",
     "synth": "cdk synth",
     "deploy": "cdk deploy",
-    "diff": "cdk diff"
+    "diff": "cdk diff",
+    "deploy:all": "./scripts/deploy-base.sh dev && ./agentcore-deploy.sh dev && ./scripts/deploy-api.sh dev",
+    "deploy:all:prod": "./scripts/deploy-base.sh prod && ./agentcore-deploy.sh prod && ./scripts/deploy-api.sh prod",
+    "deploy:base": "./scripts/deploy-base.sh dev",
+    "deploy:agentcore": "./scripts/deploy-agentcore.sh dev",
+    "deploy:api": "./scripts/deploy-api.sh dev",
+    "deploy:frontend": "./scripts/deploy-frontend.sh dev",
+    "deploy:base:prod": "./scripts/deploy-base.sh prod",
+    "deploy:agentcore:prod": "./scripts/deploy-agentcore.sh prod",
+    "deploy:api:prod": "./scripts/deploy-api.sh prod",
+    "deploy:frontend:prod": "./scripts/deploy-frontend.sh prod"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "aws-cdk": "^2.120.0",
+    "aws-cdk": "^2.1105.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.120.0",
+    "aws-cdk-lib": "^2.237.1",
     "constructs": "^10.3.0"
   }
 }

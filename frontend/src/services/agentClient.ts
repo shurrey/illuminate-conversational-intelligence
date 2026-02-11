@@ -5,6 +5,7 @@
  */
 
 import type { Message, AgentResponse, Artifact, MessageRole, StreamingEvent } from '../types/message';
+import { authService } from './authService';
 
 export interface AgentClientConfig {
   baseUrl: string;
@@ -22,6 +23,14 @@ class AgentClient {
 
   constructor(config: Partial<AgentClientConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  private getAuthHeaders(): Record<string, string> {
+    const token = this.config.apiKey || authService.getToken();
+    if (token) {
+      return { 'Authorization': `Bearer ${token}` };
+    }
+    return {};
   }
 
   /**
@@ -52,7 +61,7 @@ class AgentClient {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` })
+          ...this.getAuthHeaders()
         },
         body: JSON.stringify(request),
         signal: AbortSignal.timeout(this.config.timeout!)
@@ -72,12 +81,6 @@ class AgentClient {
       // Backend returns data directly (not wrapped in result.result)
       return this.parseResponse(result);
     } catch (error) {
-      // Only use mock response if explicitly enabled via VITE_MOCK_MODE
-      // In development, errors should be shown to help debugging
-      if (import.meta.env.VITE_MOCK_MODE === 'true') {
-        console.warn('API error, falling back to mock response:', error);
-        return this.getMockResponse(text);
-      }
       throw error;
     }
   }
@@ -126,7 +129,7 @@ class AgentClient {
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'text/event-stream',
-          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` })
+          ...this.getAuthHeaders()
         },
         body: JSON.stringify(request),
         signal
@@ -160,13 +163,7 @@ class AgentClient {
         }
       }
     } catch (error) {
-      // Only use mock response if explicitly enabled via VITE_MOCK_MODE
-      if (import.meta.env.VITE_MOCK_MODE === 'true') {
-        console.warn('API streaming error, falling back to mock response:', error);
-        yield this.getMockResponse(text);
-      } else {
-        throw error;
-      }
+      throw error;
     }
   }
 
@@ -179,7 +176,7 @@ class AgentClient {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` })
+          ...this.getAuthHeaders()
         }
       });
 
@@ -205,7 +202,7 @@ class AgentClient {
         `${this.config.baseUrl}/api/conversations/${contextId}`,
         {
           headers: {
-            ...(this.config.apiKey && { 'Authorization': `Bearer ${this.config.apiKey}` })
+            ...this.getAuthHeaders()
           }
         }
       );
@@ -230,89 +227,6 @@ class AgentClient {
     };
   }
 
-  private getMockResponse(query: string): AgentResponse {
-    const queryLower = query.toLowerCase();
-
-    // Mock responses based on query type
-    if (queryLower.includes('grade') || queryLower.includes('gpa')) {
-      return {
-        text: 'Based on the data from Fall 2024, the average GPA across all courses is **3.42**. Here are the top performing courses by average grade:',
-        artifacts: [{
-          id: crypto.randomUUID(),
-          type: 'table',
-          data: {
-            columns: ['Course', 'Department', 'Avg GPA', 'Students'],
-            rows: [
-              { Course: 'Introduction to Computer Science', Department: 'CS', 'Avg GPA': 3.7, Students: 150 },
-              { Course: 'Data Structures', Department: 'CS', 'Avg GPA': 3.5, Students: 120 },
-              { Course: 'English Composition', Department: 'English', 'Avg GPA': 3.4, Students: 180 },
-              { Course: 'Calculus I', Department: 'Math', 'Avg GPA': 3.2, Students: 200 },
-              { Course: 'Psychology 101', Department: 'Psychology', 'Avg GPA': 3.6, Students: 220 }
-            ]
-          },
-          title: 'Course Performance - Fall 2024'
-        }],
-        visualization: {
-          chart_type: 'bar',
-          title: 'Average GPA by Course',
-          x_axis: 'Course',
-          y_axis: 'Avg GPA',
-          data: [
-            { Course: 'Intro to CS', 'Avg GPA': 3.7 },
-            { Course: 'Data Structures', 'Avg GPA': 3.5 },
-            { Course: 'English Comp', 'Avg GPA': 3.4 },
-            { Course: 'Calculus I', 'Avg GPA': 3.2 },
-            { Course: 'Psychology 101', 'Avg GPA': 3.6 }
-          ]
-        }
-      };
-    }
-
-    if (queryLower.includes('enrollment') || queryLower.includes('student')) {
-      return {
-        text: 'Current enrollment data shows **870 active students** across all programs. The Computer Science program has the highest enrollment.',
-        artifacts: [{
-          id: crypto.randomUUID(),
-          type: 'table',
-          data: {
-            columns: ['Program', 'Enrolled', 'Status'],
-            rows: [
-              { Program: 'Computer Science', Enrolled: 320, Status: 'Active' },
-              { Program: 'Business Administration', Enrolled: 280, Status: 'Active' },
-              { Program: 'Psychology', Enrolled: 170, Status: 'Active' },
-              { Program: 'Engineering', Enrolled: 100, Status: 'Active' }
-            ]
-          },
-          title: 'Enrollment by Program'
-        }]
-      };
-    }
-
-    if (queryLower.includes('risk') || queryLower.includes('warning') || queryLower.includes('at-risk')) {
-      return {
-        text: 'Early warning analysis identified **23 high-risk students** based on engagement patterns. These students have been inactive for more than 7 days or show declining activity trends.',
-        artifacts: [{
-          id: crypto.randomUUID(),
-          type: 'table',
-          data: {
-            columns: ['Risk Level', 'Count', 'Action Required'],
-            rows: [
-              { 'Risk Level': 'High', Count: 23, 'Action Required': 'Immediate outreach' },
-              { 'Risk Level': 'Medium', Count: 45, 'Action Required': 'Monitor closely' },
-              { 'Risk Level': 'Low', Count: 802, 'Action Required': 'Standard support' }
-            ]
-          },
-          title: 'Student Risk Assessment'
-        }]
-      };
-    }
-
-    // Default response
-    return {
-      text: 'I can help you explore educational data from Illuminate. Try asking about:\n\n- Course grades and GPA trends\n- Student enrollment patterns\n- Engagement and activity metrics\n- At-risk student identification\n\nWhat would you like to know?',
-      artifacts: []
-    };
-  }
 }
 
 // Export singleton instance

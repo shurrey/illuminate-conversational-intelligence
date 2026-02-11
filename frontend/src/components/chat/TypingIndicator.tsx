@@ -2,7 +2,6 @@
  * TypingIndicator - Shows when agent is processing.
  */
 
-import React from 'react';
 
 interface TypingIndicatorProps {
   agentName?: string;

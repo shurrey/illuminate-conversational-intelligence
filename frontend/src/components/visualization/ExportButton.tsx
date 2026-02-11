@@ -2,7 +2,7 @@
  * ExportButton - Export data to various formats.
  */
 
-import React, { useState } from 'react';
+import { useState } from 'react';
 import type { Artifact } from '../../types/message';
 
 interface ExportButtonProps {

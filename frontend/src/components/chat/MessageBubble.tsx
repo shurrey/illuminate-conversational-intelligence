@@ -150,7 +150,7 @@ interface MessageBubbleProps {
   isLatest?: boolean;
 }
 
-export function MessageBubble({ message, isLatest = false }: MessageBubbleProps) {
+export function MessageBubble({ message, isLatest: _isLatest = false }: MessageBubbleProps) {
   const isUser = message.role === 'user';
 
   // Extract text content

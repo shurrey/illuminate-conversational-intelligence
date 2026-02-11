@@ -6,7 +6,7 @@
  * Auto-scrolls to show latest content.
  */
 
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ThinkingStep } from '../../types/message';
 
 interface ThinkingBubbleProps {

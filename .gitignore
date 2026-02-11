@@ -1,7 +1,6 @@
 # Environment & Secrets
 .env
 .env.local
-.env.*.local
 *.pem
 *.key
 
@@ -42,6 +41,17 @@ npm-debug.log*
 # Infrastructure
 infrastructure/cdk.out/
 infrastructure/node_modules/
+infrastructure/bin/*.js
+infrastructure/bin/*.d.ts
+infrastructure/lib/*.js
+infrastructure/lib/*.d.ts
+
+# Build artifacts
+*.zip
+
+# AgentCore build artifacts
+agents/*/.bedrock_agentcore/
+agents/*/.env.agentcore
 
 # Temporary
 tmp/

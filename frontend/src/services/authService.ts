@@ -1,13 +1,9 @@
 /**
- * Authentication Service - Stub implementation.
- *
- * For initial development, uses API key authentication.
- * SSO integration hooks prepared for Phase 4.
+ * Authentication Service - Cognito implementation.
  */
 
 import type { User } from '../types/message';
-
-export type SSOProvider = 'okta' | 'azure-ad' | 'adfs' | 'shibboleth';
+import { CognitoUserPool, CognitoUser, AuthenticationDetails, CognitoUserSession } from 'amazon-cognito-identity-js';
 
 interface AuthState {
   user: User | null;
@@ -23,9 +19,23 @@ class AuthService {
     isAuthenticated: false,
     token: null
   };
+  private userPool: CognitoUserPool | null = null;
 
   constructor() {
     this.loadFromStorage();
+    this.initUserPool();
+  }
+
+  private initUserPool() {
+    const userPoolId = import.meta.env.VITE_USER_POOL_ID;
+    const clientId = import.meta.env.VITE_USER_POOL_CLIENT_ID;
+
+    if (userPoolId && clientId) {
+      this.userPool = new CognitoUserPool({
+        UserPoolId: userPoolId,
+        ClientId: clientId
+      });
+    }
   }
 
   private loadFromStorage(): void {
@@ -48,78 +58,53 @@ class AuthService {
   }
 
   /**
-   * Validate API key and create session.
-   * Stub implementation for development.
+   * Login with Cognito username and password.
    */
-  async validateApiKey(apiKey: string): Promise<User | null> {
-    // In development, accept any non-empty key
-    if (import.meta.env.DEV || import.meta.env.VITE_MOCK_MODE === 'true') {
-      if (apiKey && apiKey.length > 0) {
-        const user: User = {
-          id: 'dev-user',
-          name: 'Development User',
-          role: 'analyst',
-          permissions: ['cdm_lms', 'cdm_sis', 'cdm_tlm', 'cdm_clb', 'cdm_media']
-        };
-
-        this.state = {
-          user,
-          isAuthenticated: true,
-          token: apiKey
-        };
-        this.saveToStorage();
-
-        return user;
-      }
-      return null;
+  async login(username: string, password: string): Promise<User> {
+    if (!this.userPool) {
+      throw new Error('Cognito not configured');
     }
 
-    // Production: validate against backend
-    try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/validate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`
-        }
+    return new Promise((resolve, reject) => {
+      const authDetails = new AuthenticationDetails({
+        Username: username,
+        Password: password
       });
 
-      if (!response.ok) {
-        return null;
-      }
+      const cognitoUser = new CognitoUser({
+        Username: username,
+        Pool: this.userPool!
+      });
 
-      const user = await response.json();
+      cognitoUser.authenticateUser(authDetails, {
+        onSuccess: (session: CognitoUserSession) => {
+          const idToken = session.getIdToken().getJwtToken();
+          const payload = session.getIdToken().payload;
 
-      this.state = {
-        user,
-        isAuthenticated: true,
-        token: apiKey
-      };
-      this.saveToStorage();
+          const user: User = {
+            id: payload.sub,
+            name: payload.name || payload.email || username,
+            email: payload.email,
+            role: 'analyst',
+            permissions: ['cdm_lms', 'cdm_sis', 'cdm_tlm']
+          };
 
-      return user;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Initiate SSO login flow.
-   * Hook for Phase 4 integration.
-   */
-  async initiateSSOLogin(provider: SSOProvider): Promise<void> {
-    // SSO not yet configured
-    throw new Error(`SSO provider '${provider}' not yet configured. Use API key authentication.`);
-  }
-
-  /**
-   * Handle SSO callback.
-   * Hook for Phase 4 integration.
-   */
-  async handleSSOCallback(code: string, state: string): Promise<User | null> {
-    // SSO not yet configured
-    console.log('SSO callback received:', { code, state });
-    throw new Error('SSO not yet configured. Use API key authentication.');
+          this.state = {
+            user,
+            isAuthenticated: true,
+            token: idToken
+          };
+          this.saveToStorage();
+          resolve(user);
+        },
+        onFailure: (err) => {
+          reject(new Error(err.message || 'Authentication failed'));
+        },
+        newPasswordRequired: () => {
+          reject(new Error('Password change required. Please contact administrator.'));
+        }
+      });
+    });
   }
 
   /**
@@ -133,7 +118,7 @@ class AuthService {
    * Check if user is authenticated.
    */
   isAuthenticated(): boolean {
-    return this.state.isAuthenticated;
+    return this.state.isAuthenticated && !!this.state.token;
   }
 
   /**
@@ -144,43 +129,22 @@ class AuthService {
   }
 
   /**
-   * Check if user has permission.
-   */
-  hasPermission(permission: string): boolean {
-    return this.state.user?.permissions.includes(permission) || false;
-  }
-
-  /**
    * Log out current user.
    */
   logout(): void {
+    if (this.userPool) {
+      const cognitoUser = this.userPool.getCurrentUser();
+      if (cognitoUser) {
+        cognitoUser.signOut();
+      }
+    }
+
     this.state = {
       user: null,
       isAuthenticated: false,
       token: null
     };
     localStorage.removeItem(STORAGE_KEY);
-  }
-
-  /**
-   * Auto-login for development mode.
-   */
-  devLogin(): User {
-    const user: User = {
-      id: 'dev-user',
-      name: 'Development User',
-      role: 'analyst',
-      permissions: ['cdm_lms', 'cdm_sis', 'cdm_tlm', 'cdm_clb', 'cdm_media']
-    };
-
-    this.state = {
-      user,
-      isAuthenticated: true,
-      token: 'dev-token'
-    };
-    this.saveToStorage();
-
-    return user;
   }
 }
 

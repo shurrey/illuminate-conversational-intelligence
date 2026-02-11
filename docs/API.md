@@ -1,215 +1,285 @@
-# API Reference
+# Illuminate API Reference
 
-## Base URL
+The Illuminate API is served by a Lambda proxy (`lambda_handler.py`) built with FastAPI. All traffic is routed through CloudFront:
 
-```
-http://localhost:8000
-```
+- `/*` routes to S3 (frontend static assets)
+- `/api/*` and `/health` route to the Lambda Function URL
 
 ## Authentication
 
-Development mode uses API key authentication:
+All endpoints except `GET /health` require a valid **Amazon Cognito JWT token** passed in the `Authorization` header:
 
-```bash
-curl -H "Authorization: Bearer dev-key-123" ...
+```
+Authorization: Bearer <cognito_jwt_token>
 ```
 
-Valid API keys are configured in `.env` via `VALID_API_KEYS`.
+Tokens are issued by the Cognito User Pool (`illuminate-users-dev`).
+
+## CORS
+
+CORS is configured to allow requests from the CloudFront distribution domain and `localhost` development origins.
+
+---
 
 ## Endpoints
 
-### POST /api/chat
-
-Send a query and receive a response.
-
-**Request:**
-```json
-{
-  "message": "What is the average GPA?",
-  "context_id": "optional-session-id"
-}
-```
-
-**Response:**
-```json
-{
-  "text": "The average GPA is 3.42. This is calculated across all courses...",
-  "artifacts": [
-    {
-      "id": "artifact-123",
-      "type": "table",
-      "data": {
-        "rows": [{"avg_gpa": 3.42}],
-        "columns": ["avg_gpa"]
-      },
-      "title": "Average GPA"
-    }
-  ],
-  "context_id": "session-123",
-  "suggested_followups": [
-    "Show GPA by department",
-    "What are the trends over time?"
-  ]
-}
-```
-
-### POST /api/chat/stream
-
-Send a query with streaming response (Server-Sent Events).
-
-**Request:** Same as `/api/chat`
-
-**Response:** SSE stream
-
-```
-event: status
-data: {"message": "Analyzing query..."}
-
-event: thinking
-data: {"agent": "planner", "content": "Planning execution..."}
-
-event: planning
-data: {"agent": "planner", "plan": {...}}
-
-event: sql_complete
-data: {"row_count": 5, "execution_time_ms": 150}
-
-event: analysis_complete
-data: {"agent": "analyst"}
-
-event: complete
-data: {"text": "...", "artifacts": [...], "suggested_followups": [...]}
-```
-
-### GET /api/conversations/{context_id}
-
-Get conversation history for a session.
-
-**Response:**
-```json
-{
-  "id": "session-123",
-  "messages": [
-    {
-      "id": "msg-1",
-      "role": "user",
-      "parts": [{"type": "text", "content": "What is the average GPA?"}],
-      "artifacts": [],
-      "timestamp": "2024-01-15T10:30:00Z"
-    },
-    {
-      "id": "msg-2",
-      "role": "assistant",
-      "parts": [{"type": "text", "content": "The average GPA is 3.42..."}],
-      "artifacts": [...],
-      "timestamp": "2024-01-15T10:30:05Z"
-    }
-  ]
-}
-```
-
-### DELETE /api/conversations/{context_id}
-
-Clear conversation history for a session.
-
-**Response:**
-```json
-{"status": "cleared"}
-```
-
 ### GET /health
 
-Health check endpoint.
+Health check endpoint. No authentication required.
 
-**Response:**
+**Response** `200 OK`
+
 ```json
 {
   "status": "healthy",
-  "version": "0.1.0",
-  "mock_mode": true
+  "version": "0.2.0",
+  "mode": "proxy"
 }
 ```
 
-## Artifact Types
+---
 
-### Table
+### POST /api/chat
+
+Non-streaming chat request. Sends a message to the orchestrator agent and returns the complete response once all agents have finished processing.
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+| Content-Type    | `application/json`           | Yes      |
+
+**Request Body** (A2A JSON-RPC format)
 
 ```json
 {
-  "type": "table",
-  "data": {
-    "rows": [{"col1": "value1", "col2": "value2"}],
-    "columns": ["col1", "col2"]
+  "jsonrpc": "2.0",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "text": "your question here"
+        }
+      ],
+      "messageId": "<uuid>",
+      "contextId": "<uuid>"
+    }
   },
-  "title": "Results"
+  "id": "<uuid>"
 }
 ```
 
-### Chart
+| Field                          | Type   | Description                                      |
+| ------------------------------ | ------ | ------------------------------------------------ |
+| `params.message.role`          | string | Always `"user"` for client-sent messages.        |
+| `params.message.parts`         | array  | Array of message parts (currently text only).    |
+| `params.message.parts[].type`  | string | Part type. Use `"text"`.                         |
+| `params.message.parts[].text`  | string | The user's question or instruction.              |
+| `params.message.messageId`     | string | Unique UUID identifying this message.            |
+| `params.message.contextId`     | string | UUID for the conversation context. Reuse across messages in the same conversation. |
+| `id`                           | string | JSON-RPC request identifier (UUID).              |
+
+**Response** `200 OK`
 
 ```json
 {
-  "type": "chart",
+  "text": "Here is the analysis you requested...",
+  "artifacts": [],
+  "context_id": "<uuid>",
+  "sources": null
+}
+```
+
+| Field        | Type        | Description                                             |
+| ------------ | ----------- | ------------------------------------------------------- |
+| `text`       | string      | The agent's text response.                              |
+| `artifacts`  | array       | List of artifact objects (charts, tables). May be empty. |
+| `context_id` | string      | The conversation context ID for follow-up messages.     |
+| `sources`    | array\|null | Source references, if any.                              |
+
+---
+
+### POST /api/chat/stream
+
+Streaming chat request via **Server-Sent Events (SSE)**. This is the primary endpoint used by the frontend. It sends a message to the orchestrator and streams back status updates and the final response.
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+| Content-Type    | `application/json`           | Yes      |
+| Accept          | `text/event-stream`          | Yes      |
+
+**Request Body**
+
+Same format as `POST /api/chat` (see above).
+
+**Response** `200 OK` (`text/event-stream`)
+
+The response is a stream of SSE events. Each event has the format:
+
+```
+data: <json_payload>\n\n
+```
+
+#### Event types
+
+**Status event** -- Progress updates while agents are working.
+
+```json
+{
+  "type": "status",
+  "message": "Querying agents..."
+}
+```
+
+**Complete event** -- Final result with the agent's response and any artifacts.
+
+```json
+{
+  "type": "complete",
   "data": {
-    "chart_type": "bar",
-    "title": "Enrollment by Department",
-    "x_axis": "department",
-    "y_axis": "count",
-    "data": [{"department": "CS", "count": 270}]
+    "text": "Here is the analysis you requested...",
+    "artifacts": [],
+    "contextId": "<uuid>"
   }
 }
 ```
 
-### Text
-
-```json
-{
-  "type": "text",
-  "data": "Summary text content",
-  "title": "Summary"
-}
-```
-
-### Error
+**Error event** -- Sent if an error occurs during processing.
 
 ```json
 {
   "type": "error",
-  "data": "Error message",
-  "title": "Error"
+  "message": "An error occurred while processing your request."
 }
 ```
 
-## Error Responses
+---
 
-### 400 Bad Request
+### POST /api/chat/cancel/{request_id}
+
+Cancel an in-progress chat request.
+
+**Path Parameters**
+
+| Parameter    | Type   | Description                          |
+| ------------ | ------ | ------------------------------------ |
+| `request_id` | string | The ID of the request to cancel.     |
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+
+**Response** `200 OK`
 
 ```json
 {
-  "detail": "Message is required"
+  "success": true,
+  "request_id": "<request_id>"
 }
 ```
 
-### 401 Unauthorized
+---
+
+### GET /api/conversations/{context_id}
+
+Retrieve the message history for a conversation. Conversation state is managed by AgentCore memory.
+
+**Path Parameters**
+
+| Parameter    | Type   | Description                     |
+| ------------ | ------ | ------------------------------- |
+| `context_id` | string | The conversation context UUID.  |
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+
+**Response** `200 OK`
 
 ```json
 {
-  "detail": "Invalid API key"
+  "messages": []
 }
 ```
 
-### 500 Internal Server Error
+| Field      | Type  | Description                                    |
+| ---------- | ----- | ---------------------------------------------- |
+| `messages` | array | Ordered list of messages in the conversation.  |
+
+---
+
+### DELETE /api/conversations/{context_id}
+
+Clear all messages in a conversation.
+
+**Path Parameters**
+
+| Parameter    | Type   | Description                     |
+| ------------ | ------ | ------------------------------- |
+| `context_id` | string | The conversation context UUID.  |
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+
+**Response** `200 OK`
 
 ```json
 {
-  "detail": "An error occurred processing your request"
+  "success": true
 }
 ```
 
-## Rate Limits
+---
 
-Development mode has no rate limits. Production deployments should configure appropriate limits based on LLM costs and infrastructure capacity.
+## Artifacts
 
-## CORS
+Agents may return **artifacts** alongside text responses. Artifacts represent structured data such as charts or tables that the frontend renders as interactive visualizations.
 
-The API allows CORS from `http://localhost:3000` for development. Production deployments should configure appropriate origins.
+### Chart artifact
+
+```json
+{
+  "id": "<uuid>",
+  "type": "chart",
+  "title": "Chart Title",
+  "data": {
+    "chart_type": "bar",
+    "title": "Chart Title",
+    "x_axis": "field_name",
+    "y_axis": "field_name",
+    "x_label": "X Axis Label",
+    "y_label": "Y Axis Label",
+    "data": [
+      { "field_name": "Category A", "field_name2": 123 },
+      { "field_name": "Category B", "field_name2": 456 }
+    ]
+  }
+}
+```
+
+| Field              | Type   | Description                                                        |
+| ------------------ | ------ | ------------------------------------------------------------------ |
+| `id`               | string | Unique identifier for the artifact.                                |
+| `type`             | string | Artifact type. Currently `"chart"`.                                |
+| `title`            | string | Display title for the artifact.                                    |
+| `data.chart_type`  | string | One of `bar`, `line`, `pie`, `scatter`, `histogram`.               |
+| `data.title`       | string | Chart title (may duplicate the top-level `title`).                 |
+| `data.x_axis`      | string | Field name in the data array to use for the x-axis.               |
+| `data.y_axis`      | string | Field name in the data array to use for the y-axis.               |
+| `data.x_label`     | string | Human-readable label for the x-axis.                              |
+| `data.y_label`     | string | Human-readable label for the y-axis.                              |
+| `data.data`        | array  | Array of data point objects. Keys correspond to `x_axis`/`y_axis`. |

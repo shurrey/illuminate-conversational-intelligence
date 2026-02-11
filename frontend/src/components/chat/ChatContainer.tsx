@@ -7,7 +7,6 @@
  * - Loading indicators
  */
 
-import React from 'react';
 import { useChat } from '../../hooks/useChat';
 import { MessageList } from './MessageList';
 import { InputArea } from './InputArea';

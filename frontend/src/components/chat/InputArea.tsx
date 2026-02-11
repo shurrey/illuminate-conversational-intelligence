@@ -8,7 +8,7 @@
  * - Disabled state during loading
  */
 
-import React, { useState, useRef, useEffect, KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import type { QuerySuggestion } from '../../types/message';
 
 interface InputAreaProps {

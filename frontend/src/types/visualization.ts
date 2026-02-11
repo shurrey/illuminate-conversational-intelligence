@@ -2,7 +2,7 @@
  * Type definitions for data visualization.
  */
 
-import type { ChartType, ChartConfig } from './message';
+import type { ChartConfig } from './message';
 
 export interface PlotlyData {
   x: (string | number)[];

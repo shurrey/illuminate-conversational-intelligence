@@ -1,0 +1,7 @@
+# Lambda handler dependencies
+# boto3 is provided by Lambda runtime, do not include
+fastapi>=0.100.0
+pydantic>=2.0.0
+mangum>=0.17.0
+python-jose[cryptography]>=3.3.0
+requests>=2.31.0

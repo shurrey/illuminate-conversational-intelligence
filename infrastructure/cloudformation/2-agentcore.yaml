@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Illuminate AgentCore - Gateway, Memory, Runtimes, Endpoints for A2A'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  
+  BaseStackName:
+    Type: String
+    Default: illuminate-base-dev
+    Description: Name of the base infrastructure stack
+  
+  ArtifactsBucket:
+    Type: String
+    Description: S3 bucket containing agent ZIP files
+
+Resources:
+  # ===========================================
+  # IAM Role for AgentCore
+  # ===========================================
+
+  AgentRuntimeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'illuminate-agent-runtime-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AgentPermissions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                  - bedrock:Converse
+                  - bedrock:ConverseStream
+                Resource:
+                  - 'arn:aws:bedrock:*::foundation-model/anthropic.claude-*'
+                  - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.claude-*'
+              - Effect: Allow
+                Action:
+                  - aws-marketplace:ViewSubscriptions
+                  - aws-marketplace:Subscribe
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:InvokeAgentRuntime
+                Resource:
+                  - !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/illuminate_*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub 'arn:aws:s3:::${ArtifactsBucket}/*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  Fn::ImportValue: !Sub '${BaseStackName}-SnowflakeSecret'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/*'
+
+  # ===========================================
+  # AgentCore Gateway
+  # ===========================================
+
+  IlluminateGateway:
+    Type: AWS::BedrockAgentCore::Gateway
+    Properties:
+      GatewayName: !Sub 'illuminate-gateway-${Environment}'
+      Description: 'Gateway for Illuminate A2A agent communication'
+      AuthorizerType: IAM
+
+  # ===========================================
+  # AgentCore Memory
+  # ===========================================
+
+  ConversationMemory:
+    Type: AWS::BedrockAgentCore::Memory
+    Properties:
+      MemoryName: !Sub 'illuminate-memory-${Environment}'
+      Description: 'Conversation memory for Illuminate multi-agent system'
+      EventExpiryDuration: 86400
+      MemoryRoleArn: !GetAtt AgentRuntimeRole.Arn
+
+  # ===========================================
+  # Agent Runtimes
+  # ===========================================
+
+  # Orchestrator Runtime (Sonnet 4)
+  OrchestratorRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub 'illuminate-orchestrator-${Environment}'
+      Description: 'Orchestrator agent - coordinates specialist agents'
+      AgentRuntimeArtifact:
+        S3:
+          S3BucketName: !Ref ArtifactsBucket
+          S3ObjectKey: 'agents/orchestrator.zip'
+      ExecutionRoleArn: !GetAtt AgentRuntimeRole.Arn
+
+  OrchestratorEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Properties:
+      RuntimeEndpointName: !Sub 'illuminate-orchestrator-endpoint-${Environment}'
+      Description: 'Orchestrator endpoint with Sonnet 4'
+      AgentRuntimeId: !Ref OrchestratorRuntime
+      FoundationModel: 'anthropic.claude-sonnet-4-20250514-v1:0'
+
+  # SQL Agent Runtime (Opus 4)
+  SqlAgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub 'illuminate-sql-agent-${Environment}'
+      Description: 'SQL agent - generates and executes Snowflake queries'
+      AgentRuntimeArtifact:
+        S3:
+          S3BucketName: !Ref ArtifactsBucket
+          S3ObjectKey: 'agents/sql.zip'
+      ExecutionRoleArn: !GetAtt AgentRuntimeRole.Arn
+
+  SqlAgentEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Properties:
+      RuntimeEndpointName: !Sub 'illuminate-sql-endpoint-${Environment}'
+      Description: 'SQL agent endpoint with Opus 4'
+      AgentRuntimeId: !Ref SqlAgentRuntime
+      FoundationModel: 'anthropic.claude-opus-4-20250514-v1:0'
+
+  # Analyst Agent Runtime (Opus 4)
+  AnalystAgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub 'illuminate-analyst-agent-${Environment}'
+      Description: 'Analyst agent - interprets data and identifies patterns'
+      AgentRuntimeArtifact:
+        S3:
+          S3BucketName: !Ref ArtifactsBucket
+          S3ObjectKey: 'agents/analyst.zip'
+      ExecutionRoleArn: !GetAtt AgentRuntimeRole.Arn
+
+  AnalystAgentEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Properties:
+      RuntimeEndpointName: !Sub 'illuminate-analyst-endpoint-${Environment}'
+      Description: 'Analyst agent endpoint with Opus 4'
+      AgentRuntimeId: !Ref AnalystAgentRuntime
+      FoundationModel: 'anthropic.claude-opus-4-20250514-v1:0'
+
+  # Writer Agent Runtime (Sonnet 4)
+  WriterAgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub 'illuminate-writer-agent-${Environment}'
+      Description: 'Writer agent - crafts natural language responses'
+      AgentRuntimeArtifact:
+        S3:
+          S3BucketName: !Ref ArtifactsBucket
+          S3ObjectKey: 'agents/writer.zip'
+      ExecutionRoleArn: !GetAtt AgentRuntimeRole.Arn
+
+  WriterAgentEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Properties:
+      RuntimeEndpointName: !Sub 'illuminate-writer-endpoint-${Environment}'
+      Description: 'Writer agent endpoint with Sonnet 4'
+      AgentRuntimeId: !Ref WriterAgentRuntime
+      FoundationModel: 'anthropic.claude-sonnet-4-20250514-v1:0'
+
+  # Validator Agent Runtime (Sonnet 4)
+  ValidatorAgentRuntime:
+    Type: AWS::BedrockAgentCore::Runtime
+    Properties:
+      AgentRuntimeName: !Sub 'illuminate-validator-agent-${Environment}'
+      Description: 'Validator agent - ensures FERPA compliance'
+      AgentRuntimeArtifact:
+        S3:
+          S3BucketName: !Ref ArtifactsBucket
+          S3ObjectKey: 'agents/validator.zip'
+      ExecutionRoleArn: !GetAtt AgentRuntimeRole.Arn
+
+  ValidatorAgentEndpoint:
+    Type: AWS::BedrockAgentCore::RuntimeEndpoint
+    Properties:
+      RuntimeEndpointName: !Sub 'illuminate-validator-endpoint-${Environment}'
+      Description: 'Validator agent endpoint with Sonnet 4'
+      AgentRuntimeId: !Ref ValidatorAgentRuntime
+      FoundationModel: 'anthropic.claude-sonnet-4-20250514-v1:0'
+
+Outputs:
+  GatewayId:
+    Value: !Ref IlluminateGateway
+    Description: AgentCore Gateway ID
+    Export:
+      Name: !Sub '${AWS::StackName}-GatewayId'
+  
+  MemoryId:
+    Value: !Ref ConversationMemory
+    Description: AgentCore Memory ID
+    Export:
+      Name: !Sub '${AWS::StackName}-MemoryId'
+  
+  OrchestratorRuntimeId:
+    Value: !Ref OrchestratorRuntime
+    Description: Orchestrator Runtime ID
+    Export:
+      Name: !Sub '${AWS::StackName}-OrchestratorRuntimeId'
+  
+  SqlAgentRuntimeId:
+    Value: !Ref SqlAgentRuntime
+    Description: SQL Agent Runtime ID
+    Export:
+      Name: !Sub '${AWS::StackName}-SqlAgentRuntimeId'
+  
+  AnalystAgentRuntimeId:
+    Value: !Ref AnalystAgentRuntime
+    Description: Analyst Agent Runtime ID
+    Export:
+      Name: !Sub '${AWS::StackName}-AnalystAgentRuntimeId'
+  
+  WriterAgentRuntimeId:
+    Value: !Ref WriterAgentRuntime
+    Description: Writer Agent Runtime ID
+    Export:
+      Name: !Sub '${AWS::StackName}-WriterAgentRuntimeId'
+  
+  ValidatorAgentRuntimeId:
+    Value: !Ref ValidatorAgentRuntime
+    Description: Validator Agent Runtime ID
+    Export:
+      Name: !Sub '${AWS::StackName}-ValidatorAgentRuntimeId'
+
+  OrchestratorEndpointId:
+    Value: !Ref OrchestratorEndpoint
+    Description: Orchestrator Endpoint ID
+    Export:
+      Name: !Sub '${AWS::StackName}-OrchestratorEndpointId'

@@ -7,7 +7,7 @@
  * - Scroll to bottom button
  */
 
-import React, { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { MessageBubble } from './MessageBubble';
 import type { Message } from '../../types/message';
 

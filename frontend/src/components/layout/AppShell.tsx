@@ -8,9 +8,10 @@ import { Sidebar } from './Sidebar';
 
 interface AppShellProps {
   children: ReactNode;
+  onLogout?: () => void;
 }
 
-export function AppShell({ children }: AppShellProps) {
+export function AppShell({ children, onLogout }: AppShellProps) {
   const [sidebarOpen, setSidebarOpen] = React.useState(false);
 
   return (
@@ -35,7 +36,7 @@ export function AppShell({ children }: AppShellProps) {
 
       {/* Main content */}
       <div className="flex-1 flex flex-col min-w-0">
-        <Header onMenuClick={() => setSidebarOpen(true)} />
+        <Header onMenuClick={() => setSidebarOpen(true)} onLogout={onLogout} />
         <main className="flex-1 overflow-hidden">
           {children}
         </main>
