@@ -115,7 +115,3 @@ illuminate-ici/
 - "What is the average GPA for Fall 2024?"
 - "Show me a bar chart of tables by schema"
 - "Now break that down by department" (follow-up)
-
-## License
-
-Proprietary - Anthology Inc.
