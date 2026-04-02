@@ -4,11 +4,13 @@ Illuminate Conversational Intelligence - API Proxy Lambda
 Thin proxy between the frontend and the Orchestrator AgentCore runtime.
 No agent code runs here — all agent logic runs in Bedrock AgentCore runtimes.
 
-Request flow:
-    Frontend -> Lambda Function URL -> This Lambda -> Orchestrator AgentCore (A2A)
+Uses Lambda Web Adapter (LWA) to run FastAPI/uvicorn inside Lambda, enabling
+real SSE streaming via RESPONSE_STREAM Function URL invoke mode. LWA proxies
+incoming Lambda invocations to the local uvicorn server and streams bytes back.
 
-The Orchestrator AgentCore runtime coordinates all specialist agents:
-    Orchestrator -> SQL, Analyst, Writer, Validator
+Request flow:
+    Frontend -> Lambda Function URL (RESPONSE_STREAM) -> LWA -> uvicorn/FastAPI
+        -> Orchestrator AgentCore (A2A) -> SQL, Analyst, Writer, Validator
 """
 import os
 import json
@@ -21,7 +23,6 @@ from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from mangum import Mangum
 
 # JWT validation
 from jose import jwt, JWTError
@@ -656,7 +657,27 @@ async def clear_conversation(
 
 
 # =============================================================================
-# Lambda Handler (Mangum ASGI Adapter)
+# Lambda Web Adapter: start uvicorn so LWA can proxy requests to it
 # =============================================================================
+# Lambda Web Adapter (LWA) runs as a Lambda extension and forwards incoming
+# Lambda invocations to a local HTTP server.  We start uvicorn in a daemon
+# thread at import time so it is ready when LWA performs its readiness check
+# against /health.  With InvokeMode: RESPONSE_STREAM on the Function URL,
+# LWA streams SSE bytes back to the caller in real time.
 
-handler = Mangum(app, lifespan="off")
+import threading
+import uvicorn
+
+_LWA_PORT = int(os.environ.get("PORT", "8080"))
+
+
+def _start_server():
+    uvicorn.run(app, host="0.0.0.0", port=_LWA_PORT, log_level="info")
+
+
+threading.Thread(target=_start_server, daemon=True).start()
+
+
+# Dummy handler — LWA intercepts all invocations before this is called.
+def handler(event, context):
+    return {"statusCode": 200, "body": "OK"}

@@ -89,6 +89,10 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       Timeout: 900
       MemorySize: 1024
+      # Lambda Web Adapter — runs uvicorn inside Lambda, enables real SSE streaming
+      # https://github.com/awslabs/aws-lambda-web-adapter
+      Layers:
+        - !Sub 'arn:aws:lambda:${AWS::Region}:753240598075:layer:LambdaAdapterLayerX86_64:24'
       Code:
         S3Bucket:
           Fn::ImportValue: !Sub '${BaseStackName}-ArtifactsBucket'
@@ -101,6 +105,11 @@ Resources:
           - Fn::ImportValue: !Sub '${BaseStackName}-SecurityGroup'
       Environment:
         Variables:
+          # Lambda Web Adapter settings
+          PORT: '8080'
+          AWS_LWA_READINESS_CHECK_PATH: '/health'
+          AWS_LWA_INVOKE_MODE: 'response_stream'
+          # Application settings
           ILLUMINATE_USE_A2A: 'true'
           ORCHESTRATOR_ENDPOINT_URL: !Ref OrchestratorEndpointUrl
           ARTIFACTS_BUCKET:
@@ -141,7 +150,7 @@ Resources:
     Properties:
       AuthType: NONE
       TargetFunctionArn: !Ref ApiHandlerFunction
-      InvokeMode: BUFFERED
+      InvokeMode: RESPONSE_STREAM
 
   # Function URL requires BOTH InvokeFunctionUrl AND InvokeFunction permissions.
   # See: https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html
