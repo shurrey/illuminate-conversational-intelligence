@@ -212,6 +212,7 @@ Resources:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: !Sub 'illuminate-users-${Environment}'
+      UserPoolTier: LITE
       AutoVerifiedAttributes:
         - email
       UsernameAttributes:

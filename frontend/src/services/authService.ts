@@ -78,13 +78,15 @@ class AuthService {
 
       cognitoUser.authenticateUser(authDetails, {
         onSuccess: (session: CognitoUserSession) => {
-          const idToken = session.getIdToken().getJwtToken();
-          const payload = session.getIdToken().payload;
+          // Use the access token for API calls (AgentCore OAuth expects the
+          // client_id claim which is only in the access token, not the ID token)
+          const accessToken = session.getAccessToken().getJwtToken();
+          const idPayload = session.getIdToken().payload;
 
           const user: User = {
-            id: payload.sub,
-            name: payload.name || payload.email || username,
-            email: payload.email,
+            id: idPayload.sub,
+            name: idPayload.name || idPayload.email || username,
+            email: idPayload.email,
             role: 'analyst',
             permissions: ['cdm_lms', 'cdm_sis', 'cdm_tlm']
           };
@@ -92,7 +94,7 @@ class AuthService {
           this.state = {
             user,
             isAuthenticated: true,
-            token: idToken
+            token: accessToken
           };
           this.saveToStorage();
           resolve(user);

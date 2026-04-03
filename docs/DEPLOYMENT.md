@@ -52,8 +52,8 @@ The deploying IAM principal needs permissions for:
 Before deploying, enable access to the following models in the **us-east-1**
 region via the Bedrock console (Model Access page):
 
-- **Claude Sonnet 4** (`anthropic.claude-sonnet-4-20250514`)
-- **Claude Opus 4** (`anthropic.claude-opus-4-20250514`)
+- **Claude Sonnet 4.6** (`anthropic.claude-sonnet-4-6`)
+- **Claude Opus 4.6** (`anthropic.claude-opus-4-6-v1`)
 
 ### Snowflake Account
 
@@ -76,32 +76,41 @@ availability may vary by region).
 ## 2. Initial Setup (Snowflake Credentials)
 
 Snowflake credentials are passed to the base infrastructure stack and stored
-in AWS Secrets Manager. Set these environment variables before deploying:
+in AWS Secrets Manager. Create a `.env` file from the provided example:
 
 ```bash
-export SNOWFLAKE_ACCOUNT="your-account-identifier"
-export SNOWFLAKE_USER="SVC_BLACKBOARD_DATA"
-export SNOWFLAKE_PASSWORD="your-password"
-export SNOWFLAKE_DATABASE="your-database"
-export SNOWFLAKE_WAREHOUSE="BLACKBOARD_DATA_WH"
-export SNOWFLAKE_ROLE="BBDATA_USER_ROLE"
+cp .env.example .env
 ```
 
-These values are passed as `NoEcho` parameters to CloudFormation and stored in
-the Secrets Manager secret `illuminate/dev/snowflake`. After the initial
-deployment, the secret persists in Secrets Manager and does not need to be
-re-supplied for subsequent stack updates.
+Then edit `.env` and fill in your values:
+
+```
+SNOWFLAKE_ACCOUNT=your-account-identifier
+SNOWFLAKE_USER=SVC_BLACKBOARD_DATA
+SNOWFLAKE_PASSWORD=your-password
+SNOWFLAKE_DATABASE=your-database
+SNOWFLAKE_WAREHOUSE=BLACKBOARD_DATA_WH
+SNOWFLAKE_ROLE=BBDATA_USER_ROLE
+```
+
+The `.env` file is loaded automatically by `deploy-base.sh`. Values are passed
+as `NoEcho` parameters to CloudFormation and stored in the Secrets Manager
+secret `illuminate/dev/snowflake`. After the initial deployment, the secret
+persists in Secrets Manager and does not need to be re-supplied for subsequent
+stack updates.
+
+> **Note:** `.env` is gitignored and should never be committed.
 
 ### Python Virtual Environment
 
-Create a virtual environment at the project root (the scripts expect `venv/`,
-not `.venv/`):
+Create a virtual environment at the project root:
 
 ```bash
 cd /path/to/illuminate
-python3.11 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install --upgrade pip
+pip install python-dotenv
 ```
 
 ---
@@ -165,9 +174,8 @@ This script:
 ### Option B: Deploy Stacks Individually
 
 ```bash
-# Stack 1: Base infrastructure
-SNOWFLAKE_ACCOUNT=xxx SNOWFLAKE_PASSWORD=xxx \
-  infrastructure/scripts/deploy-base.sh dev
+# Stack 1: Base infrastructure (reads credentials from .env)
+infrastructure/scripts/deploy-base.sh dev
 
 # Stack 2: AgentCore CloudFormation resources
 infrastructure/scripts/deploy-agentcore.sh dev
@@ -613,12 +621,12 @@ aws cloudfront create-invalidation --distribution-id $DIST_ID --paths "/*"
 | Variable | Used By | Description |
 |----------|---------|-------------|
 | `AWS_REGION` | All scripts | AWS region (default: `us-east-1`) |
-| `SNOWFLAKE_ACCOUNT` | `deploy-base.sh` | Snowflake account identifier |
-| `SNOWFLAKE_USER` | `deploy-base.sh` | Snowflake service user |
-| `SNOWFLAKE_PASSWORD` | `deploy-base.sh` | Snowflake password |
-| `SNOWFLAKE_DATABASE` | `deploy-base.sh` | Snowflake database name |
-| `SNOWFLAKE_WAREHOUSE` | `deploy-base.sh` | Snowflake warehouse name |
-| `SNOWFLAKE_ROLE` | `deploy-base.sh` | Snowflake role |
+| `SNOWFLAKE_ACCOUNT` | `.env` → `deploy-base.sh` | Snowflake account identifier |
+| `SNOWFLAKE_USER` | `.env` → `deploy-base.sh` | Snowflake service user |
+| `SNOWFLAKE_PASSWORD` | `.env` → `deploy-base.sh` | Snowflake password |
+| `SNOWFLAKE_DATABASE` | `.env` → `deploy-base.sh` | Snowflake database name |
+| `SNOWFLAKE_WAREHOUSE` | `.env` → `deploy-base.sh` | Snowflake warehouse name |
+| `SNOWFLAKE_ROLE` | `.env` → `deploy-base.sh` | Snowflake role |
 | `ORCHESTRATOR_ENDPOINT_URL` | Lambda | AgentCore orchestrator runtime URL |
 | `USER_POOL_ID` | Lambda | Cognito User Pool ID |
 | `USER_POOL_CLIENT_ID` | Lambda | Cognito App Client ID |

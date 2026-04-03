@@ -4,10 +4,14 @@ set -e
 ENVIRONMENT=${1:-dev}
 echo "Deploying AgentCore agents to $ENVIRONMENT"
 
-# Activate venv
-cd ..
-source venv/bin/activate
-cd infrastructure
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Resolve the starter toolkit's agentcore CLI.
+# The npm @aws/agentcore-cli may shadow it, so we find the Python entry point.
+AGENTCORE="$(python3 -c "import sysconfig, os; p=os.path.join(sysconfig.get_path('scripts'),'agentcore'); print(p) if os.path.exists(p) else exit(1)" 2>/dev/null)" \
+  || { echo "ERROR: bedrock-agentcore-starter-toolkit not found. Install with: pip install bedrock-agentcore-starter-toolkit"; exit 1; }
+echo "Using agentcore CLI: $AGENTCORE"
 
 # Get Cognito configuration from base stack
 USER_POOL_ID=$(aws cloudformation describe-stacks \
@@ -66,7 +70,10 @@ PERMISSIONS_POLICY=$(cat <<EOF
         "bedrock:InvokeModel",
         "bedrock:InvokeModelWithResponseStream"
       ],
-      "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*"
+      "Resource": [
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*",
+        "arn:aws:bedrock:*:$ACCOUNT_ID:inference-profile/us.anthropic.claude-*"
+      ]
     },
     {
       "Effect": "Allow",
@@ -118,24 +125,34 @@ echo "✓ IAM role ready: $ROLE_ARN"
 echo ""
 
 # Create OAuth authorizer config JSON
+# Note: allowedAudience is omitted because Cognito access tokens use the
+# 'client_id' claim (matched by allowedClients) rather than 'aud'.
 AUTH_CONFIG=$(cat <<EOF
 {
   "customJWTAuthorizer": {
     "discoveryUrl": "$ISSUER_URL/.well-known/openid-configuration",
-    "allowedAudience": ["$CLIENT_ID"],
     "allowedClients": ["$CLIENT_ID"]
   }
 }
 EOF
 )
 
-# Deploy SQL Agent
+# Helper: launch agent and extract ARN
+# Prints full output to stderr for visibility, returns just the ARN on stdout
+launch_and_get_arn() {
+  local output
+  output=$($AGENTCORE launch --auto-update-on-conflict 2>&1)
+  echo "$output" >&2
+  echo "$output" | grep -o 'arn:aws:bedrock-agentcore:[^ ]*' | head -1
+}
+
+# Deploy SQL Agent (SigV4 auth — called by orchestrator, not external clients)
 echo "Deploying SQL Agent..."
 cd ../agents/sql
-agentcore configure -e a2a_server.py --protocol A2A --non-interactive \
-  --authorizer-config "$AUTH_CONFIG" --name "illuminate_sql_$ENVIRONMENT" \
+$AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
+  --name "illuminate_sql_$ENVIRONMENT" \
   --execution-role "$ROLE_ARN"
-SQL_ARN=$(agentcore launch 2>&1 | tee /dev/tty | grep -o 'arn:aws:bedrock-agentcore:[^ ]*' | head -1 || echo "")
+SQL_ARN=$(launch_and_get_arn)
 if [ -z "$SQL_ARN" ]; then
   echo "Failed to get SQL ARN"
   exit 1
@@ -147,10 +164,10 @@ echo ""
 # Deploy Analyst Agent
 echo "Deploying Analyst Agent..."
 cd ../analyst
-agentcore configure -e a2a_server.py --protocol A2A --non-interactive \
-  --authorizer-config "$AUTH_CONFIG" --name "illuminate_analyst_$ENVIRONMENT" \
+$AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
+  --name "illuminate_analyst_$ENVIRONMENT" \
   --execution-role "$ROLE_ARN"
-ANALYST_ARN=$(agentcore launch 2>&1 | tee /dev/tty | grep -o 'arn:aws:bedrock-agentcore:[^ ]*' | head -1 || echo "")
+ANALYST_ARN=$(launch_and_get_arn)
 if [ -z "$ANALYST_ARN" ]; then
   echo "Failed to get Analyst ARN"
   exit 1
@@ -162,10 +179,10 @@ echo ""
 # Deploy Writer Agent
 echo "Deploying Writer Agent..."
 cd ../writer
-agentcore configure -e a2a_server.py --protocol A2A --non-interactive \
-  --authorizer-config "$AUTH_CONFIG" --name "illuminate_writer_$ENVIRONMENT" \
+$AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
+  --name "illuminate_writer_$ENVIRONMENT" \
   --execution-role "$ROLE_ARN"
-WRITER_ARN=$(agentcore launch 2>&1 | tee /dev/tty | grep -o 'arn:aws:bedrock-agentcore:[^ ]*' | head -1 || echo "")
+WRITER_ARN=$(launch_and_get_arn)
 if [ -z "$WRITER_ARN" ]; then
   echo "Failed to get Writer ARN"
   exit 1
@@ -177,10 +194,10 @@ echo ""
 # Deploy Validator Agent
 echo "Deploying Validator Agent..."
 cd ../validator
-agentcore configure -e a2a_server.py --protocol A2A --non-interactive \
-  --authorizer-config "$AUTH_CONFIG" --name "illuminate_validator_$ENVIRONMENT" \
+$AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
+  --name "illuminate_validator_$ENVIRONMENT" \
   --execution-role "$ROLE_ARN"
-VALIDATOR_ARN=$(agentcore launch 2>&1 | tee /dev/tty | grep -o 'arn:aws:bedrock-agentcore:[^ ]*' | head -1 || echo "")
+VALIDATOR_ARN=$(launch_and_get_arn)
 if [ -z "$VALIDATOR_ARN" ]; then
   echo "Failed to get Validator ARN"
   exit 1
@@ -211,16 +228,16 @@ cd ../orchestrator
 # Create .env file with agent URLs for orchestrator
 cat > .env.agentcore << EOF
 ILLUMINATE_USE_A2A=true
-SQL_AGENT_URL=$SQL_URL
-ANALYST_AGENT_URL=$ANALYST_URL
-WRITER_AGENT_URL=$WRITER_URL
-VALIDATOR_AGENT_URL=$VALIDATOR_URL
+SQL_AGENT_ARN=$SQL_ARN
+ANALYST_AGENT_ARN=$ANALYST_ARN
+WRITER_AGENT_ARN=$WRITER_ARN
+VALIDATOR_AGENT_ARN=$VALIDATOR_ARN
 EOF
 
-agentcore configure -e a2a_server.py --protocol A2A --non-interactive \
+$AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
   --authorizer-config "$AUTH_CONFIG" --name "illuminate_orchestrator_$ENVIRONMENT" \
   --execution-role "$ROLE_ARN"
-ORCHESTRATOR_ARN=$(agentcore launch 2>&1 | tee /dev/tty | grep -o 'arn:aws:bedrock-agentcore:[^ ]*' | head -1 || echo "")
+ORCHESTRATOR_ARN=$(launch_and_get_arn)
 if [ -z "$ORCHESTRATOR_ARN" ]; then
   echo "Failed to get Orchestrator ARN"
   exit 1

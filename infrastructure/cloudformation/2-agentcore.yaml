@@ -100,7 +100,7 @@ Resources:
   # Agent Runtimes
   # ===========================================
 
-  # Orchestrator Runtime (Sonnet 4)
+  # Orchestrator Runtime (Sonnet 4.6)
   OrchestratorRuntime:
     Type: AWS::BedrockAgentCore::Runtime
     Properties:
@@ -116,11 +116,11 @@ Resources:
     Type: AWS::BedrockAgentCore::RuntimeEndpoint
     Properties:
       RuntimeEndpointName: !Sub 'illuminate-orchestrator-endpoint-${Environment}'
-      Description: 'Orchestrator endpoint with Sonnet 4'
+      Description: 'Orchestrator endpoint with Sonnet 4.6'
       AgentRuntimeId: !Ref OrchestratorRuntime
-      FoundationModel: 'anthropic.claude-sonnet-4-20250514-v1:0'
+      FoundationModel: 'anthropic.claude-sonnet-4-6-v1:0'
 
-  # SQL Agent Runtime (Opus 4)
+  # SQL Agent Runtime (Opus 4.6)
   SqlAgentRuntime:
     Type: AWS::BedrockAgentCore::Runtime
     Properties:
@@ -136,11 +136,11 @@ Resources:
     Type: AWS::BedrockAgentCore::RuntimeEndpoint
     Properties:
       RuntimeEndpointName: !Sub 'illuminate-sql-endpoint-${Environment}'
-      Description: 'SQL agent endpoint with Opus 4'
+      Description: 'SQL agent endpoint with Opus 4.6'
       AgentRuntimeId: !Ref SqlAgentRuntime
-      FoundationModel: 'anthropic.claude-opus-4-20250514-v1:0'
+      FoundationModel: 'anthropic.claude-opus-4-6-v1:0'
 
-  # Analyst Agent Runtime (Opus 4)
+  # Analyst Agent Runtime (Opus 4.6)
   AnalystAgentRuntime:
     Type: AWS::BedrockAgentCore::Runtime
     Properties:
@@ -156,11 +156,11 @@ Resources:
     Type: AWS::BedrockAgentCore::RuntimeEndpoint
     Properties:
       RuntimeEndpointName: !Sub 'illuminate-analyst-endpoint-${Environment}'
-      Description: 'Analyst agent endpoint with Opus 4'
+      Description: 'Analyst agent endpoint with Opus 4.6'
       AgentRuntimeId: !Ref AnalystAgentRuntime
-      FoundationModel: 'anthropic.claude-opus-4-20250514-v1:0'
+      FoundationModel: 'anthropic.claude-opus-4-6-v1:0'
 
-  # Writer Agent Runtime (Sonnet 4)
+  # Writer Agent Runtime (Sonnet 4.6)
   WriterAgentRuntime:
     Type: AWS::BedrockAgentCore::Runtime
     Properties:
@@ -176,11 +176,11 @@ Resources:
     Type: AWS::BedrockAgentCore::RuntimeEndpoint
     Properties:
       RuntimeEndpointName: !Sub 'illuminate-writer-endpoint-${Environment}'
-      Description: 'Writer agent endpoint with Sonnet 4'
+      Description: 'Writer agent endpoint with Sonnet 4.6'
       AgentRuntimeId: !Ref WriterAgentRuntime
-      FoundationModel: 'anthropic.claude-sonnet-4-20250514-v1:0'
+      FoundationModel: 'anthropic.claude-sonnet-4-6-v1:0'
 
-  # Validator Agent Runtime (Sonnet 4)
+  # Validator Agent Runtime (Sonnet 4.6)
   ValidatorAgentRuntime:
     Type: AWS::BedrockAgentCore::Runtime
     Properties:
@@ -196,9 +196,9 @@ Resources:
     Type: AWS::BedrockAgentCore::RuntimeEndpoint
     Properties:
       RuntimeEndpointName: !Sub 'illuminate-validator-endpoint-${Environment}'
-      Description: 'Validator agent endpoint with Sonnet 4'
+      Description: 'Validator agent endpoint with Sonnet 4.6'
       AgentRuntimeId: !Ref ValidatorAgentRuntime
-      FoundationModel: 'anthropic.claude-sonnet-4-20250514-v1:0'
+      FoundationModel: 'anthropic.claude-sonnet-4-6-v1:0'
 
 Outputs:
   GatewayId:

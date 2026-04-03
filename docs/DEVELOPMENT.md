@@ -217,7 +217,7 @@ AWS SDK calls, not direct network connections.
            return "result"
 
        model = BedrockModel(
-           model_id=os.environ.get("MODEL_ID", "anthropic.claude-sonnet-4-20250514"),
+           model_id=os.environ.get("MODEL_ID", "anthropic.claude-sonnet-4-6"),
            region_name=os.environ.get("AWS_REGION", "us-east-1"),
        )
 

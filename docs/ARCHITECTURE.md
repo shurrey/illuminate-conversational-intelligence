@@ -105,7 +105,7 @@ Each agent follows the same structural pattern:
 | Property    | Value                                         |
 |-------------|-----------------------------------------------|
 | File        | `agents/orchestrator/a2a_server.py`           |
-| Model       | Claude Sonnet 4 (`claude-sonnet-4-20250514`)  |
+| Model       | Claude Sonnet 4.6 (`claude-sonnet-4-6`)       |
 | Role        | Central coordinator; routes to specialists     |
 | Tools       | `query_database`, `analyze_data`, `write_response`, `validate_response` |
 
@@ -128,7 +128,7 @@ For visualization requests, the orchestrator embeds `[CHART_CONFIG]...[/CHART_CO
 | Property    | Value                                         |
 |-------------|-----------------------------------------------|
 | File        | `agents/sql/a2a_server.py`                    |
-| Model       | Claude Opus 4 (`claude-opus-4-20250514`)      |
+| Model       | Claude Opus 4.6 (`claude-opus-4-6-v1`)        |
 | Role        | Generate and execute SQL against Snowflake     |
 | Tools       | `list_objects`, `describe_object`, `run_snowflake_query` |
 
@@ -140,14 +140,14 @@ Key safeguards:
 - The system prompt enforces FERPA rules: aggregate data only, minimum 5 individuals per group, `PERSON_ID` used only for JOINs.
 - Default `LIMIT 100` to prevent unbounded result sets.
 
-Opus 4 was chosen for SQL generation because it produces more accurate and complex queries than Sonnet 4, particularly for multi-table JOINs and window functions.
+Opus 4.6 was chosen for SQL generation because it produces more accurate and complex queries than Sonnet 4.6, particularly for multi-table JOINs and window functions.
 
 ### 2.3 Analyst Agent
 
 | Property    | Value                                         |
 |-------------|-----------------------------------------------|
 | File        | `agents/analyst/a2a_server.py`                |
-| Model       | Claude Opus 4 (`claude-opus-4-20250514`)      |
+| Model       | Claude Opus 4.6 (`claude-opus-4-6-v1`)        |
 | Role        | Interpret data; identify trends and patterns   |
 | Tools       | `analyze_data`                                |
 
@@ -158,14 +158,14 @@ The analyst receives query results (typically markdown tables) and the original 
 - 2-3 actionable recommendations
 - Educational context (e.g., course completion benchmarks)
 
-Opus 4 was chosen for its superior analytical reasoning on numeric data.
+Opus 4.6 was chosen for its superior analytical reasoning on numeric data.
 
 ### 2.4 Writer Agent
 
 | Property    | Value                                         |
 |-------------|-----------------------------------------------|
 | File        | `agents/writer/a2a_server.py`                 |
-| Model       | Claude Sonnet 4 (`claude-sonnet-4-20250514`)  |
+| Model       | Claude Sonnet 4.6 (`claude-sonnet-4-6`)       |
 | Role        | Craft clear, user-facing natural language      |
 | Tools       | `write_response`                              |
 
@@ -176,7 +176,7 @@ The writer transforms raw data and analysis into conversational prose for educat
 | Property    | Value                                         |
 |-------------|-----------------------------------------------|
 | File        | `agents/validator/a2a_server.py`              |
-| Model       | Claude Sonnet 4 (`claude-sonnet-4-20250514`)  |
+| Model       | Claude Sonnet 4.6 (`claude-sonnet-4-6`)       |
 | Role        | FERPA compliance, PII detection, accuracy      |
 | Tools       | `validate_response`                           |
 

@@ -28,8 +28,8 @@ BUILD_DIR=$(mktemp -d)
 trap "rm -rf $BUILD_DIR" EXIT
 
 # Activate virtual environment if present
-if [ -f "$PROJECT_ROOT/venv/bin/activate" ]; then
-  source "$PROJECT_ROOT/venv/bin/activate"
+if [ -f "$PROJECT_ROOT/.venv/bin/activate" ]; then
+  source "$PROJECT_ROOT/.venv/bin/activate"
 fi
 
 # Install Python dependencies into build directory (targeting Lambda's Amazon Linux x86_64)
@@ -41,8 +41,9 @@ pip install -q -t "$BUILD_DIR" \
   --only-binary=:all: \
   -r requirements-lambda.txt
 
-# Copy only the Lambda handler (NO agents/ directory)
+# Copy the Lambda handler and run.sh startup script (NO agents/ directory)
 cp lambda_handler.py "$BUILD_DIR/"
+cp run.sh "$BUILD_DIR/"
 
 # Create zip from build directory
 cd "$BUILD_DIR"
@@ -101,8 +102,8 @@ FRONTEND_ORIGIN=$(aws cloudformation describe-stacks --stack-name "$FRONTEND_STA
 
 PARAM_OVERRIDES="Environment=$ENVIRONMENT BaseStackName=$BASE_STACK OrchestratorEndpointUrl=$ORCHESTRATOR_URL"
 if [ -n "$FRONTEND_ORIGIN" ]; then
-  PARAM_OVERRIDES="$PARAM_OVERRIDES FrontendOrigin=https://$FRONTEND_ORIGIN"
-  echo -e "Frontend origin: ${YELLOW}https://$FRONTEND_ORIGIN${NC}"
+  PARAM_OVERRIDES="$PARAM_OVERRIDES FrontendOrigin=$FRONTEND_ORIGIN"
+  echo -e "Frontend origin: ${YELLOW}$FRONTEND_ORIGIN${NC}"
 fi
 
 aws cloudformation deploy \

@@ -241,7 +241,7 @@ interactive chart in the user's browser.
     log("Creating Bedrock model + Strands Agent ...")
     model_id = os.environ.get(
         "BEDROCK_MODEL_ID",
-        "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "us.anthropic.claude-sonnet-4-6",
     )
     bedrock_model = BedrockModel(
         region_name=region,

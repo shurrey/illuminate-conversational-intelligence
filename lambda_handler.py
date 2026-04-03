@@ -150,9 +150,13 @@ def _validate_token(token: str) -> Optional[dict]:
             token,
             key,
             algorithms=["RS256"],
-            audience=USER_POOL_CLIENT_ID,
-            issuer=f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{USER_POOL_ID}"
+            issuer=f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{USER_POOL_ID}",
+            options={"verify_aud": False}
         )
+        # Verify client_id for access tokens or aud for ID tokens
+        token_client = claims.get("client_id") or claims.get("aud")
+        if token_client != USER_POOL_CLIENT_ID:
+            return None
         return claims
 
     except (JWTError, Exception):
@@ -235,32 +239,22 @@ class HealthResponse(BaseModel):
 class AgentCoreA2AClient:
     """
     Lightweight A2A client for forwarding requests to the Orchestrator
-    AgentCore runtime endpoint via boto3 SDK (SigV4 auth handled automatically).
+    AgentCore runtime endpoint.
+
+    When agents are configured with OAuth authorization, the AWS SDK cannot be
+    used for invoke_agent_runtime.  Instead we make direct HTTPS POST requests
+    and pass the user's JWT in the Authorization header.
     """
 
     def __init__(self, endpoint_url: str, timeout: float = 300.0):
         self.timeout = timeout
-        from botocore.config import Config
-        self._agentcore_client = boto3.client(
-            'bedrock-agentcore',
-            region_name=AWS_REGION,
-            config=Config(read_timeout=300, connect_timeout=10, retries={"max_attempts": 1}),
-        )
-        # Extract runtime ARN from the endpoint URL
-        self._runtime_arn = self._extract_runtime_arn(endpoint_url)
-        logger.info(f"AgentCore client initialized with ARN: {self._runtime_arn}")
-
-    @staticmethod
-    def _extract_runtime_arn(url: str) -> str:
-        """Extract or construct the runtime ARN from the endpoint URL."""
-        import re
-        url = url.rstrip("/")
-        # Extract runtime ID from /runtimes/{id}/invocations format
-        match = re.search(r'/runtimes/([^/]+?)(/invocations)?$', url)
-        if match:
-            runtime_id = match.group(1)
-            return f"arn:aws:bedrock-agentcore:{AWS_REGION}:{ACCOUNT_ID}:runtime/{runtime_id}"
-        return url
+        # Ensure the endpoint URL ends with /invocations
+        self._endpoint_url = endpoint_url.rstrip("/")
+        if not self._endpoint_url.endswith("/invocations"):
+            self._endpoint_url += "/invocations"
+        # OAuth HTTPS calls require accountId as a query parameter
+        self._endpoint_url += f"?accountId={ACCOUNT_ID}&qualifier=DEFAULT"
+        logger.info(f"AgentCore client initialized with URL: {self._endpoint_url}")
 
     def _build_a2a_request(self, method: str, message_text: str, context_id: Optional[str] = None) -> dict:
         return {
@@ -277,44 +271,49 @@ class AgentCoreA2AClient:
             "id": str(uuid.uuid4())
         }
 
+    def _invoke_https(self, payload: bytes, auth_token: Optional[str] = None) -> bytes:
+        """Make a direct HTTPS POST to the AgentCore runtime endpoint."""
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+
+        resp = http_requests.post(
+            self._endpoint_url,
+            data=payload,
+            headers=headers,
+            timeout=self.timeout,
+        )
+
+        logger.info(f"AgentCore response status={resp.status_code}, body={resp.text[:1000]}")
+
+        if resp.status_code >= 400:
+            raise Exception(f"AgentCore returned {resp.status_code}: {resp.text[:500]}")
+
+        return resp.content
+
     async def send_message(
         self,
         message_text: str,
         context_id: Optional[str] = None,
         auth_token: Optional[str] = None
     ) -> dict:
-        """Send a message to the Orchestrator via boto3 invoke_agent_runtime."""
+        """Send a message to the Orchestrator via HTTPS."""
         import asyncio
 
         a2a_request = self._build_a2a_request("message/send", message_text, context_id)
         payload = json.dumps(a2a_request).encode('utf-8')
 
-        logger.info(f"Invoking AgentCore runtime: {self._runtime_arn}")
+        logger.info(f"Invoking AgentCore runtime: {self._endpoint_url}")
 
-        # boto3 is synchronous, run in executor
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, lambda: self._agentcore_client.invoke_agent_runtime(
-            agentRuntimeArn=self._runtime_arn,
-            qualifier='DEFAULT',
-            contentType='application/json',
-            accept='application/json',
-            payload=payload
-        ))
+        response_body = await loop.run_in_executor(
+            None, lambda: self._invoke_https(payload, auth_token)
+        )
 
-        # Response body is in 'response' key (blob), not 'payload'
-        response_body = response.get('response')
-        if isinstance(response_body, (bytes, bytearray)):
-            response_body = response_body
-        elif hasattr(response_body, 'read'):
-            response_body = response_body.read()
-        else:
-            response_body = None
-
-        status_code = response.get('statusCode', 0)
-        logger.info(f"AgentCore response status: {status_code}, body length: {len(response_body) if response_body else 0}")
-
-        if not response_body:
-            raise Exception(f"Empty response from AgentCore (status={status_code})")
+        logger.info(f"AgentCore response length: {len(response_body)}")
 
         result = json.loads(response_body.decode('utf-8'))
         logger.info(f"AgentCore response keys: {list(result.keys())}")
@@ -346,25 +345,12 @@ class AgentCoreA2AClient:
         a2a_request = self._build_a2a_request("message/send", message_text, context_id)
         payload = json.dumps(a2a_request).encode('utf-8')
 
-        logger.info(f"Invoking AgentCore runtime (streaming): {self._runtime_arn}")
+        logger.info(f"Invoking AgentCore runtime (streaming): {self._endpoint_url}")
 
         loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, lambda: self._agentcore_client.invoke_agent_runtime(
-            agentRuntimeArn=self._runtime_arn,
-            qualifier='DEFAULT',
-            contentType='application/json',
-            accept='application/json',
-            payload=payload
-        ))
-
-        # Response body is in 'response' key (blob)
-        response_body = response.get('response')
-        if isinstance(response_body, (bytes, bytearray)):
-            pass
-        elif hasattr(response_body, 'read'):
-            response_body = response_body.read()
-        else:
-            response_body = None
+        response_body = await loop.run_in_executor(
+            None, lambda: self._invoke_https(payload, auth_token)
+        )
 
         if response_body:
             result = json.loads(response_body.decode('utf-8'))
@@ -657,27 +643,13 @@ async def clear_conversation(
 
 
 # =============================================================================
-# Lambda Web Adapter: start uvicorn so LWA can proxy requests to it
+# Lambda Web Adapter entry point
 # =============================================================================
-# Lambda Web Adapter (LWA) runs as a Lambda extension and forwards incoming
-# Lambda invocations to a local HTTP server.  We start uvicorn in a daemon
-# thread at import time so it is ready when LWA performs its readiness check
-# against /health.  With InvokeMode: RESPONSE_STREAM on the Function URL,
-# LWA streams SSE bytes back to the caller in real time.
+# When run as __main__ (via run.sh), start uvicorn.  LWA handles proxying
+# Lambda invocations to the local HTTP server and streaming responses back.
 
-import threading
-import uvicorn
-
-_LWA_PORT = int(os.environ.get("PORT", "8080"))
-
-
-def _start_server():
-    uvicorn.run(app, host="0.0.0.0", port=_LWA_PORT, log_level="info")
-
-
-threading.Thread(target=_start_server, daemon=True).start()
-
-
-# Dummy handler — LWA intercepts all invocations before this is called.
-def handler(event, context):
-    return {"statusCode": 200, "body": "OK"}
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", "8080"))
+    logger.info(f"Starting uvicorn on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
