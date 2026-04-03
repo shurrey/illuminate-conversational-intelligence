@@ -5,7 +5,8 @@
  * and navigation between multiple queries.
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { format as formatSql } from 'sql-formatter';
 import type { Artifact } from '../../types/message';
 
 interface SqlModalProps {
@@ -19,6 +20,19 @@ export function SqlModal({ artifacts, onClose }: SqlModalProps) {
 
   const current = artifacts[currentIndex];
   const hasMultiple = artifacts.length > 1;
+
+  const formattedSql = useMemo(() => {
+    try {
+      return formatSql(current.data as string, {
+        language: 'snowflake',
+        keywordCase: 'upper',
+        indentStyle: 'standard',
+        logicalOperatorNewline: 'before',
+      });
+    } catch {
+      return current.data as string;
+    }
+  }, [current]);
 
   const handleCopy = async () => {
     try {
@@ -90,7 +104,7 @@ export function SqlModal({ artifacts, onClose }: SqlModalProps) {
         <div className="flex-1 overflow-auto p-5">
           <div className="relative group">
             <pre className="p-4 rounded-lg bg-gray-800 text-gray-100 overflow-x-auto text-sm font-mono leading-relaxed whitespace-pre-wrap">
-              <code>{current.data as string}</code>
+              <code>{formattedSql}</code>
             </pre>
             <button
               onClick={handleCopy}
