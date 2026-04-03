@@ -94,8 +94,8 @@ from strands import Agent, tool
 from strands.models import BedrockModel
 from strands.multiagent.a2a.executor import StrandsA2AExecutor
 from bedrock_agentcore.runtime.a2a import build_a2a_app
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
+from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
 
 # Create boto3 client for AgentCore (SigV4 auth via IAM role)
 # Use extended timeout since specialist agents involve LLM calls
@@ -270,27 +270,21 @@ bedrock_model = BedrockModel(
 )
 log(f"  Model: {model_id}")
 
-# Configure AgentCore STM for persistent conversation history
-session_manager = None
+# STM memory via AgentCoreMemorySessionManager
+# The session_manager persists conversation history across requests using
+# AgentCore's memory service. The ASGI middleware below routes each request's
+# contextId to the right session before the agent processes it.
 memory_id = os.environ.get("BEDROCK_AGENTCORE_MEMORY_ID", "")
+log(f"  Memory ID: {memory_id or '(none)'}")
+
+session_manager = None
 if memory_id:
     try:
-        from bedrock_agentcore.memory.integrations.strands import (
-            AgentCoreMemorySessionManager,
-            AgentCoreMemoryConfig,
-        )
-        stm_config = AgentCoreMemoryConfig(
-            memory_id=memory_id,
-            session_id="default",  # overridden per-request via middleware
-            actor_id="orchestrator",
-        )
-        session_manager = AgentCoreMemorySessionManager(
-            agentcore_memory_config=stm_config,
-            region_name=region,
-        )
-        log(f"  STM memory configured: {memory_id}")
+        memory_config = AgentCoreMemoryConfig(memory_id=memory_id)
+        session_manager = AgentCoreMemorySessionManager(config=memory_config)
+        log(f"  STM session manager created for memory_id={memory_id}")
     except Exception as e:
-        log(f"  STM memory setup failed (will use in-memory fallback): {e}")
+        log(f"  WARNING: Failed to create session manager: {e}")
 
 strands_agent = Agent(
     name="Illuminate Orchestrator",
@@ -298,66 +292,88 @@ strands_agent = Agent(
     model=bedrock_model,
     system_prompt=SYSTEM_PROMPT,
     tools=[query_database, analyze_data, write_response, validate_response],
-    callback_handler=None,
     session_manager=session_manager,
+    callback_handler=None,
 )
 
 executor = StrandsA2AExecutor(strands_agent)
 log("DONE: Agent initialized")
 
+# Build the Starlette app with /ping and A2A routes
+_inner_app = build_a2a_app(executor)
+log("Inner app built (Starlette with /ping + A2A routes)")
 
-# --- Session Routing Middleware ---
-class SessionRoutingMiddleware(BaseHTTPMiddleware):
-    """Set the STM session_id from the A2A contextId before each request.
 
-    This ensures that when the strands Agent processes a message, its
-    AgentCoreMemorySessionManager loads/saves conversation history for
-    the correct conversation (identified by contextId).
-    """
+# --- Pure ASGI middleware for STM session routing ---
+# BaseHTTPMiddleware breaks SSE streaming because it buffers responses via
+# call_next(). This pure ASGI middleware reads the request body to extract
+# contextId and routes STM to the right session WITHOUT buffering responses.
 
-    async def dispatch(self, request: Request, call_next):
-        if request.method != "POST":
-            return await call_next(request)
+class SessionRoutingMiddleware:
+    """Pure ASGI middleware that routes contextId → STM session."""
 
-        body_bytes = await request.body()
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") != "POST" or session_manager is None:
+            return await self.app(scope, receive, send)
+
+        # Collect the request body from ASGI receive messages
+        body_parts = []
+        body_complete = False
+
+        async def receive_wrapper():
+            nonlocal body_complete
+            message = await receive()
+            if message.get("type") == "http.request":
+                body_parts.append(message.get("body", b""))
+                if not message.get("more_body", False):
+                    body_complete = True
+            return message
+
+        # We need to read the body to extract contextId, but also replay it
+        # for the downstream app. Read via wrapper, then replay.
+        raw_body = b""
+        while not body_complete:
+            msg = await receive_wrapper()
+            if msg.get("type") == "http.disconnect":
+                return
+
+        raw_body = b"".join(body_parts)
+
+        # Extract contextId from the A2A JSON-RPC request body
         try:
-            body_json = json.loads(body_bytes)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return await call_next(request)
+            payload = json.loads(raw_body)
+            context_id = None
+            params = payload.get("params", {})
+            if isinstance(params, dict):
+                message = params.get("message", {})
+                if isinstance(message, dict):
+                    context_id = message.get("contextId")
 
-        # Route STM for both message/send and message/stream
-        if body_json.get("method") in ("message/send", "message/stream"):
-            params = body_json.get("params", {})
-            message = params.get("message", {})
-            context_id = message.get("contextId")
-            if context_id and session_manager is not None:
-                try:
-                    session_manager.config.session_id = context_id
-                    log(f"  STM session routed to: {context_id}")
-                except Exception as e:
-                    log(f"  STM session routing failed: {e}")
+            if context_id and session_manager:
+                session_manager.config.session_id = context_id
+                log(f"  STM session routed to contextId={context_id}")
+        except (json.JSONDecodeError, AttributeError):
+            pass
 
-        # For message/stream, return early — BaseHTTPMiddleware's _receive
-        # override breaks SSE streaming. Starlette caches request.body()
-        # so the downstream handler can still read it.
-        if body_json.get("method") != "message/send":
-            return await call_next(request)
+        # Replay the already-consumed body for the downstream app
+        body_sent = False
 
-        # For message/send, re-inject the body for the downstream handler
-        async def receive():
-            return {"type": "http.request", "body": body_bytes}
-        request._receive = receive
+        async def replay_receive():
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": raw_body, "more_body": False}
+            # After body is replayed, pass through to original receive for disconnect etc.
+            return await receive()
 
-        return await call_next(request)
+        await self.app(scope, replay_receive, send)
 
 
-# Build the Starlette app with /ping and A2A routes — exposed at module level
-# so AgentCore runtime can import it as `a2a_server:app` or `a2a_server.app`
-app = build_a2a_app(executor)
-
-# Add session routing middleware so STM uses the right contextId per request
-app.add_middleware(SessionRoutingMiddleware)
-log("App built (Starlette with /ping + A2A routes + STM session routing)")
+app = SessionRoutingMiddleware(_inner_app)
+log("App wrapped with STM session routing middleware")
 
 if __name__ == "__main__":
     import uvicorn

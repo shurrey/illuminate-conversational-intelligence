@@ -302,12 +302,16 @@ def _build_a2a_request(method: str, message_text: str, context_id: Optional[str]
 def _invoke_orchestrator_sync(message_text: str, context_id: Optional[str] = None) -> dict:
     """Invoke orchestrator via boto3 (synchronous, JSON response)."""
     payload = _build_a2a_request("message/send", message_text, context_id)
-    response = _agentcore_boto3.invoke_agent_runtime(
+    invoke_kwargs = dict(
         agentRuntimeArn=ORCHESTRATOR_ARN,
         contentType="application/json",
         accept="application/json",
         payload=json.dumps(payload).encode(),
     )
+    # Pass session ID so AgentCore routes to the correct STM memory session
+    if context_id:
+        invoke_kwargs["runtimeSessionId"] = context_id
+    response = _agentcore_boto3.invoke_agent_runtime(**invoke_kwargs)
     body = json.loads(response["response"].read().decode())
     logger.info(f"AgentCore sync response keys: {list(body.keys())}")
     if "error" in body:
@@ -318,12 +322,16 @@ def _invoke_orchestrator_sync(message_text: str, context_id: Optional[str] = Non
 def _invoke_orchestrator_stream(message_text: str, context_id: Optional[str] = None):
     """Invoke orchestrator via boto3 with SSE streaming. Yields raw SSE data strings."""
     payload = _build_a2a_request("message/stream", message_text, context_id)
-    response = _agentcore_boto3.invoke_agent_runtime(
+    invoke_kwargs = dict(
         agentRuntimeArn=ORCHESTRATOR_ARN,
         contentType="application/json",
         accept="text/event-stream",
         payload=json.dumps(payload).encode(),
     )
+    # Pass session ID so AgentCore routes to the correct STM memory session
+    if context_id:
+        invoke_kwargs["runtimeSessionId"] = context_id
+    response = _agentcore_boto3.invoke_agent_runtime(**invoke_kwargs)
 
     # The response body is a botocore StreamingBody — read SSE lines incrementally
     stream = response["response"]

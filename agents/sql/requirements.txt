@@ -1,8 +1,8 @@
-strands-agents[a2a]
-strands-agents-tools
-bedrock-agentcore
-fastapi>=0.115.0
-uvicorn>=0.32.0
-pydantic>=2.0.0
-snowflake-connector-python>=3.0.0
-boto3>=1.34.0
+strands-agents[a2a]==1.34.1
+strands-agents-tools==0.3.0
+bedrock-agentcore==1.6.0
+fastapi==0.115.12
+uvicorn==0.34.2
+pydantic==2.11.3
+snowflake-connector-python==3.14.0
+boto3==1.42.81

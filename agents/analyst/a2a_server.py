@@ -1,45 +1,42 @@
+#!/usr/bin/env python3
 """
 Analyst Agent - Self-contained A2A server for AgentCore deployment.
 
-Interprets data, identifies trends, and generates insights from
-educational data. Zero `from agents.*` imports.
+Uses bedrock_agentcore.runtime.a2a.build_a2a_app() to create a Starlette app
+with proper /ping and A2A routes for AgentCore.
+
+The `app` object is exposed at module level so that AgentCore's runtime can
+import it (e.g., `uvicorn a2a_server:app`).
 """
 import os
 import sys
-import traceback
 from pathlib import Path
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
-startup_log = []
-startup_error = None
 
 
 def log(msg):
-    startup_log.append(msg)
     print(msg, file=sys.stderr, flush=True)
 
 
-try:
-    log("Loading .env.agentcore ...")
-    env_file = Path(__file__).parent / ".env.agentcore"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            key, _, value = line.partition("=")
-            if key and value and key not in os.environ:
-                os.environ[key] = value
-        log(f"  Loaded {env_file}")
+# Load .env.agentcore
+env_file = Path(__file__).parent / ".env.agentcore"
+if env_file.exists():
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+    log(f"Loaded {env_file}")
 
-    log("Importing dependencies ...")
-    from strands import Agent, tool
-    from strands.models import BedrockModel
-    from strands.multiagent.a2a import A2AServer
+log("Importing dependencies ...")
+from strands import Agent, tool
+from strands.models import BedrockModel
+from strands.multiagent.a2a.executor import StrandsA2AExecutor
+from bedrock_agentcore.runtime.a2a import build_a2a_app
 
-    # --- System Prompt ---
-    ANALYST_SYSTEM_PROMPT = """You are the Analyst Agent for an educational data analytics system.
+# --- System Prompt ---
+ANALYST_SYSTEM_PROMPT = """You are the Analyst Agent for an educational data analytics system.
 Your job is to interpret data and generate meaningful insights for educators and administrators.
 
 ## Your Role
@@ -84,89 +81,51 @@ Provide your analysis as structured prose with clear sections:
 - Do NOT make up statistics - only report what the data shows
 - Be clear about what the data supports vs. what is speculation"""
 
-    # --- Tool ---
-    @tool
-    def analyze_data(user_query: str, data: str) -> str:
-        """Receive data and user query for analysis.
+# --- Tool ---
+@tool
+def analyze_data(user_query: str, data: str) -> str:
+    """Receive data and user query for analysis.
 
-        Args:
-            user_query: The user's original question about the data.
-            data: The data to analyze, formatted as a markdown table or JSON string.
+    Args:
+        user_query: The user's original question about the data.
+        data: The data to analyze, formatted as a markdown table or JSON string.
 
-        Returns:
-            The data formatted for the agent to analyze.
-        """
-        return f"User Question: {user_query}\n\nData:\n{data}"
+    Returns:
+        The data formatted for the agent to analyze.
+    """
+    return f"User Question: {user_query}\n\nData:\n{data}"
 
-    # --- Create Strands Agent ---
-    log("Creating Bedrock model + Strands Agent ...")
-    model_id = os.environ.get(
-        "BEDROCK_MODEL_ID",
-        "us.anthropic.claude-sonnet-4-6",
-    )
-    bedrock_model = BedrockModel(
-        region_name=os.environ.get("AWS_REGION", "us-east-1"),
-        model_id=model_id,
-    )
-    log(f"  Model: {model_id}")
+# --- Create Strands Agent ---
+log("Creating Bedrock model + Strands Agent ...")
+model_id = os.environ.get(
+    "BEDROCK_MODEL_ID",
+    "us.anthropic.claude-sonnet-4-6",
+)
+bedrock_model = BedrockModel(
+    region_name=os.environ.get("AWS_REGION", "us-east-1"),
+    model_id=model_id,
+)
+log(f"  Model: {model_id}")
 
-    strands_agent = Agent(
-        name="Illuminate Analyst Agent",
-        description="Interprets educational data and generates insights, trends, and recommendations.",
-        model=bedrock_model,
-        tools=[analyze_data],
-        system_prompt=ANALYST_SYSTEM_PROMPT,
-        callback_handler=None,
-    )
+strands_agent = Agent(
+    name="Illuminate Analyst Agent",
+    description="Interprets educational data and generates insights, trends, and recommendations.",
+    model=bedrock_model,
+    tools=[analyze_data],
+    system_prompt=ANALYST_SYSTEM_PROMPT,
+    callback_handler=None,
+)
 
-    # --- Wrap in A2AServer ---
-    log("Creating A2AServer ...")
-    runtime_url = os.environ.get("AGENTCORE_RUNTIME_URL", "http://127.0.0.1:9002/")
-    a2a_server = A2AServer(
-        agent=strands_agent,
-        http_url=runtime_url,
-        serve_at_root=True,
-    )
+executor = StrandsA2AExecutor(strands_agent)
+log("DONE: Agent initialized")
 
-    log("Building FastAPI app ...")
-    app = FastAPI()
-
-    @app.get("/ping")
-    def ping():
-        return {"status": "healthy"}
-
-    @app.get("/_startup_log")
-    def get_startup_log():
-        return {"log": startup_log, "error": startup_error}
-
-    app.mount("/", a2a_server.to_fastapi_app())
-    log("DONE: App fully initialized")
-
-except Exception as e:
-    startup_error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-    log(f"FAILED: {startup_error}")
-
-    app = FastAPI()
-
-    @app.get("/ping")
-    def ping():
-        return {"status": "error", "failed_at": startup_log[-1] if startup_log else "unknown"}
-
-    @app.get("/_startup_log")
-    def get_startup_log():
-        return {"log": startup_log, "error": startup_error}
-
-    @app.api_route("/{path:path}", methods=["GET", "POST"])
-    async def error_handler(request: Request, path: str):
-        return JSONResponse(
-            status_code=200,
-            content={
-                "jsonrpc": "2.0",
-                "result": {"text": f"Analyst Agent init failed: {startup_error}"},
-                "id": "error",
-            },
-        )
+# Build the Starlette app with /ping and A2A routes — exposed at module level
+# so AgentCore runtime can import it as `a2a_server:app` or `a2a_server.app`
+app = build_a2a_app(executor)
+log("App built (Starlette with /ping + A2A routes)")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=9000)
+    port = int(os.environ.get("PORT", "9000"))
+    log(f"Starting uvicorn on 0.0.0.0:{port} ...")
+    uvicorn.run(app, host="0.0.0.0", port=port)

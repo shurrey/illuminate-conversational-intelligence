@@ -4,20 +4,20 @@ agents:
     name: illuminate_analyst_dev
     language: python
     node_version: '20'
-    entrypoint: /Users/shurrey/local/test-bb-data/agents/analyst/a2a_server.py
-    deployment_type: direct_code_deploy
-    runtime_type: PYTHON_3_11
+    entrypoint: /Users/scott.hurrey/local/illuminate-conversational-intelligence/agents/analyst/a2a_server.py
+    deployment_type: container
+    runtime_type: null
     platform: linux/arm64
-    container_runtime: null
-    source_path: /Users/shurrey/local/test-bb-data/agents/analyst
+    container_runtime: docker
+    source_path: /Users/scott.hurrey/local/illuminate-conversational-intelligence/agents/analyst
     aws:
-      execution_role: arn:aws:iam::442606396405:role/illuminate-agent-role-dev
+      execution_role: arn:aws:iam::856599266077:role/illuminate-agent-role-dev
       execution_role_auto_create: true
-      account: '442606396405'
+      account: '856599266077'
       region: us-east-1
-      ecr_repository: null
+      ecr_repository: 856599266077.dkr.ecr.us-east-1.amazonaws.com/bedrock-agentcore-illuminate_analyst_dev
       ecr_auto_create: false
-      s3_path: s3://bedrock-agentcore-codebuild-sources-442606396405-us-east-1
+      s3_path: null
       s3_auto_create: false
       network_configuration:
         network_mode: PUBLIC
@@ -30,21 +30,21 @@ agents:
         idle_runtime_session_timeout: null
         max_lifetime: null
     bedrock_agentcore:
-      agent_id: illuminate_analyst_dev-5LNCC56sJ0
-      agent_arn: arn:aws:bedrock-agentcore:us-east-1:442606396405:runtime/illuminate_analyst_dev-5LNCC56sJ0
-      agent_session_id: e7d81161-319e-430b-ac5e-ab4a3502a6a9
+      agent_id: illuminate_analyst_dev-XCRy4t7XvN
+      agent_arn: arn:aws:bedrock-agentcore:us-east-1:856599266077:runtime/illuminate_analyst_dev-XCRy4t7XvN
+      agent_session_id: e550eb1a-ec38-461e-9e9c-ed5e7d85a829
     codebuild:
-      project_name: null
-      execution_role: null
-      source_bucket: null
+      project_name: bedrock-agentcore-illuminate_analyst_dev-builder
+      execution_role: arn:aws:iam::856599266077:role/AmazonBedrockAgentCoreSDKCodeBuild-us-east-1-88297ab21b
+      source_bucket: bedrock-agentcore-codebuild-sources-856599266077-us-east-1
     memory:
       mode: STM_ONLY
-      memory_id: illuminate_analyst_dev_mem-BrMqZG4Jr7
-      memory_arn: arn:aws:bedrock-agentcore:us-east-1:442606396405:memory/illuminate_analyst_dev_mem-BrMqZG4Jr7
+      memory_id: illuminate_analyst_dev_mem-r65WRh4wL3
+      memory_arn: arn:aws:bedrock-agentcore:us-east-1:856599266077:memory/illuminate_analyst_dev_mem-r65WRh4wL3
       memory_name: illuminate_analyst_dev_mem
       event_expiry_days: 30
       first_invoke_memory_check_done: true
-      was_created_by_toolkit: true
+      was_created_by_toolkit: false
     identity:
       credential_providers: []
       workload: null
