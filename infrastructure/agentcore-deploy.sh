@@ -87,6 +87,18 @@ PERMISSIONS_POLICY=$(cat <<EOF
     {
       "Effect": "Allow",
       "Action": [
+        "bedrock-agentcore:ListEvents",
+        "bedrock-agentcore:CreateEvent",
+        "bedrock-agentcore:GetEvent",
+        "bedrock-agentcore:ListSessions",
+        "bedrock-agentcore:CreateSession",
+        "bedrock-agentcore:GetSession"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:us-east-1:$ACCOUNT_ID:memory/illuminate_*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
         "s3:GetObject",
         "s3:GetBucketLocation",
         "s3:ListBucket"
