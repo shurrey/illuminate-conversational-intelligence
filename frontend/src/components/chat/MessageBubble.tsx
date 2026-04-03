@@ -15,6 +15,7 @@ import type { Message, Artifact, ThinkingStep } from '../../types/message';
 import { ChartRenderer } from '../visualization/ChartRenderer';
 import { DataTable } from '../visualization/DataTable';
 import { ExportButton } from '../visualization/ExportButton';
+import { SqlModal } from '../visualization/SqlModal';
 
 /**
  * CodeBlock component with copy functionality
@@ -152,12 +153,17 @@ interface MessageBubbleProps {
 
 export function MessageBubble({ message, isLatest: _isLatest = false }: MessageBubbleProps) {
   const isUser = message.role === 'user';
+  const [sqlModalOpen, setSqlModalOpen] = useState(false);
 
   // Extract text content
   const textContent = message.parts
     .filter(part => part.type === 'text')
     .map(part => part.content as string)
     .join('\n');
+
+  // Split artifacts: SQL artifacts render as a badge, others render inline
+  const displayArtifacts = message.artifacts?.filter(a => a.type !== 'sql') || [];
+  const sqlArtifacts = message.artifacts?.filter(a => a.type === 'sql') || [];
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -282,20 +288,40 @@ export function MessageBubble({ message, isLatest: _isLatest = false }: MessageB
           </ReactMarkdown>
         </div>
 
-        {/* Artifacts */}
-        {message.artifacts && message.artifacts.length > 0 && (
+        {/* Artifacts (charts, tables, text, errors — not SQL) */}
+        {displayArtifacts.length > 0 && (
           <div className="mt-3 space-y-3">
-            {message.artifacts.map(artifact => (
+            {displayArtifacts.map(artifact => (
               <ArtifactRenderer key={artifact.id} artifact={artifact} />
             ))}
 
             {/* Export button for data artifacts */}
-            {message.artifacts.some(a => a.type === 'table' || a.type === 'chart') && (
+            {displayArtifacts.some(a => a.type === 'table' || a.type === 'chart') && (
               <div className="pt-2">
-                <ExportButton artifacts={message.artifacts} />
+                <ExportButton artifacts={displayArtifacts} />
               </div>
             )}
           </div>
+        )}
+
+        {/* SQL query badge */}
+        {sqlArtifacts.length > 0 && (
+          <div className="mt-3">
+            <button
+              onClick={() => setSqlModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-full transition-colors"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+              </svg>
+              View SQL {sqlArtifacts.length > 1 ? `(${sqlArtifacts.length} queries)` : ''}
+            </button>
+          </div>
+        )}
+
+        {/* SQL modal */}
+        {sqlModalOpen && sqlArtifacts.length > 0 && (
+          <SqlModal artifacts={sqlArtifacts} onClose={() => setSqlModalOpen(false)} />
         )}
 
         {/* Timestamp */}

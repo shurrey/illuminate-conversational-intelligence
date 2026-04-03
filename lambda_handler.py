@@ -73,6 +73,7 @@ def strip_tool_status_markers(text: str) -> str:
 # =============================================================================
 
 _CHART_PATTERN = re.compile(r'\[CHART_CONFIG\]\s*(.*?)\s*\[/CHART_CONFIG\]', re.DOTALL)
+_SQL_QUERY_PATTERN = re.compile(r'\[SQL_QUERY\]\s*(.*?)\s*\[/SQL_QUERY\]', re.DOTALL)
 
 
 def extract_chart_configs(text: str) -> tuple[str, list[dict]]:
@@ -116,6 +117,44 @@ def extract_chart_configs(text: str) -> tuple[str, list[dict]]:
     cleaned = _CHART_PATTERN.sub('', text).strip()
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned, charts
+
+
+# =============================================================================
+# SQL query extraction from [SQL_QUERY] text markers
+# =============================================================================
+
+def extract_sql_queries(text: str) -> tuple[str, list[dict]]:
+    """Extract [SQL_QUERY]{...}[/SQL_QUERY] blocks from agent text.
+
+    Returns (cleaned_text, list_of_frontend_sql_artifacts).
+    """
+    matches = list(_SQL_QUERY_PATTERN.finditer(text))
+    if not matches:
+        return text, []
+
+    sql_artifacts = []
+    for match in matches:
+        try:
+            config = json.loads(match.group(1))
+            sql_text = config.get("sql", "")
+            title = config.get("title", "SQL Query")
+
+            if sql_text:
+                sql_artifact = {
+                    "id": str(uuid.uuid4()),
+                    "type": "sql",
+                    "title": title,
+                    "data": sql_text,
+                }
+                sql_artifacts.append(sql_artifact)
+                logger.info(f"Extracted SQL query: '{title}'")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"Failed to parse SQL query config: {e}")
+
+    # Remove markers from text and clean up whitespace
+    cleaned = _SQL_QUERY_PATTERN.sub('', text).strip()
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned, sql_artifacts
 
 
 # =============================================================================
@@ -494,12 +533,15 @@ async def send_message_streaming(message_text: str, context_id: Optional[str] = 
         yield {"type": "error", "message": "Empty response from AgentCore"}
         return
 
-    # Strip [TOOL_STATUS:...] markers, then extract charts
+    # Strip [TOOL_STATUS:...] markers, then extract charts and SQL queries
     full_text = strip_tool_status_markers(full_text)
     cleaned_text, chart_artifacts = extract_chart_configs(full_text)
-    artifacts = chart_artifacts if chart_artifacts else []
+    cleaned_text, sql_artifacts = extract_sql_queries(cleaned_text)
+    artifacts = chart_artifacts + sql_artifacts
     if chart_artifacts:
         logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into streaming response")
+    if sql_artifacts:
+        logger.info(f"Injected {len(sql_artifacts)} SQL artifact(s) into streaming response")
 
     yield {
         "type": "complete",
@@ -591,11 +633,14 @@ async def chat(
         text = _extract_text_from_result(result) if isinstance(result, dict) else ""
         text = strip_tool_status_markers(text)
 
-        # Extract chart markers from text and create frontend-format artifacts
+        # Extract chart markers and SQL queries from text
         cleaned_text, chart_artifacts = extract_chart_configs(text)
-        artifacts = chart_artifacts if chart_artifacts else []
+        cleaned_text, sql_artifacts = extract_sql_queries(cleaned_text)
+        artifacts = chart_artifacts + sql_artifacts
         if chart_artifacts:
             logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into response")
+        if sql_artifacts:
+            logger.info(f"Injected {len(sql_artifacts)} SQL artifact(s) into response")
 
         return ChatResponse(
             text=cleaned_text,

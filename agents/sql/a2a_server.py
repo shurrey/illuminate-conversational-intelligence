@@ -242,10 +242,11 @@ def run_snowflake_query(query: str) -> str:
         columns = [desc[0] for desc in cursor.description]
 
         if not rows:
-            return "Query returned no results."
+            return f"**SQL Executed:**\n```sql\n{query}\n```\n\nQuery returned no results."
 
-        # Format as markdown table
-        lines = [f"Query returned {len(rows)} row(s):\n"]
+        # Format as markdown table, with the SQL statement included
+        lines = [f"**SQL Executed:**\n```sql\n{query}\n```\n"]
+        lines.append(f"Query returned {len(rows)} row(s):\n")
         lines.append("| " + " | ".join(columns) + " |")
         lines.append("| " + " | ".join(["---"] * len(columns)) + " |")
         for row in rows:

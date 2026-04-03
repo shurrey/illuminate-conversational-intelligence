@@ -249,6 +249,24 @@ For example, your output should look like:
 This is critical for user experience — always emit the marker IMMEDIATELY before each tool call.
 Do NOT include these markers in your final written response to the user.
 
+## SQL Query Transparency
+
+The SQL Agent includes the SQL it executed in its response. You MUST extract these SQL statements
+and include them in your final response using [SQL_QUERY] markers so the user can see what queries
+were run. This is important for transparency and debugging.
+
+**Format:** Include this structure in your response text for EACH SQL query that was executed:
+
+[SQL_QUERY]
+{"title": "Brief description of what this query does", "sql": "SELECT ..."}
+[/SQL_QUERY]
+
+- Extract the SQL from the `query_database` tool response (it appears in a ```sql code block)
+- The "title" should be a short human-readable description (e.g., "Average GPA by Term")
+- The "sql" must be the exact SQL that was executed — do not modify it
+- Include ALL SQL queries that were run, even if multiple queries were needed
+- Place [SQL_QUERY] markers at the END of your response, after all other content
+
 ## Important Rules
 - Always start with `query_database` when the user asks about data
 - When the user asks for a chart/graph/visualization, you MUST include a [CHART_CONFIG] block with actual data
@@ -256,7 +274,8 @@ Do NOT include these markers in your final written response to the user.
 - Pass the FULL results between agents — do not summarize prematurely
 - If validation fails, revise the response and re-validate
 - Never expose individual student data or PII
-- Keep your final response focused and actionable for educational administrators"""
+- Keep your final response focused and actionable for educational administrators
+- Always include [SQL_QUERY] markers for any SQL queries that were executed"""
 
 # --- Create Strands Agent with STM Memory ---
 log("Creating Bedrock model + Strands Agent ...")

@@ -4,7 +4,7 @@
 
 export type MessageRole = 'user' | 'assistant' | 'system';
 
-export type ArtifactType = 'table' | 'chart' | 'text' | 'error';
+export type ArtifactType = 'table' | 'chart' | 'text' | 'error' | 'sql';
 
 export type ChartType = 'bar' | 'line' | 'pie' | 'scatter' | 'heatmap' | 'histogram';
 
