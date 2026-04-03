@@ -45,6 +45,30 @@ logger = logging.getLogger("API-PROXY")
 
 
 # =============================================================================
+# Tool status marker extraction from [TOOL_STATUS:name] markers
+# =============================================================================
+
+_TOOL_STATUS_PATTERN = re.compile(r'\[TOOL_STATUS:(\w+)\]')
+
+# Tool-name → user-friendly status message
+_TOOL_STATUS_MESSAGES = {
+    "query_database": "Querying Snowflake database...",
+    "list_objects": "Discovering database tables...",
+    "describe_object": "Reading table schema...",
+    "run_snowflake_query": "Executing SQL query...",
+    "analyze_data": "Analyzing results...",
+    "write_response": "Preparing response...",
+    "validate_response": "Validating for compliance...",
+}
+
+
+def strip_tool_status_markers(text: str) -> str:
+    """Remove [TOOL_STATUS:name] markers and surrounding whitespace from text."""
+    cleaned = _TOOL_STATUS_PATTERN.sub('', text)
+    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+
+# =============================================================================
 # Chart extraction from [CHART_CONFIG] text markers
 # =============================================================================
 
@@ -257,17 +281,6 @@ _agentcore_boto3 = boto3.client(
 logger.info(f"boto3 bedrock-agentcore client created (timeout={A2A_TIMEOUT}s)")
 
 
-# Tool-name → user-friendly status message
-_TOOL_STATUS = {
-    "query_database": "Querying Snowflake database...",
-    "list_objects": "Discovering database tables...",
-    "describe_object": "Reading table schema...",
-    "run_snowflake_query": "Executing SQL query...",
-    "analyze_data": "Analyzing results...",
-    "write_response": "Preparing response...",
-    "validate_response": "Validating for compliance...",
-}
-
 
 def _build_a2a_request(method: str, message_text: str, context_id: Optional[str] = None) -> dict:
     """Build a JSON-RPC A2A request payload."""
@@ -368,6 +381,7 @@ async def send_message_streaming(message_text: str, context_id: Optional[str] = 
     yield {"type": "status", "message": "Routing to orchestrator..."}
 
     full_text = ""
+    streaming_buffer = ""  # accumulates chunks to detect multi-token markers
     result_context_id = None
     got_result = False
     loop = asyncio.get_event_loop()
@@ -422,11 +436,18 @@ async def send_message_streaming(message_text: str, context_id: Optional[str] = 
                         for part in msg.get("parts", []):
                             chunk = part.get("text", "")
                             if chunk:
-                                # Check for tool name mentions (from orchestrator's internal logging)
-                                for tool_name, friendly_msg in _TOOL_STATUS.items():
-                                    if tool_name in chunk.lower():
-                                        yield {"type": "status", "message": friendly_msg}
-                                        break
+                                # Accumulate text to detect multi-token markers
+                                streaming_buffer += chunk
+                                # Check for [TOOL_STATUS:name] markers
+                                match = _TOOL_STATUS_PATTERN.search(streaming_buffer)
+                                if match:
+                                    tool_name = match.group(1)
+                                    friendly = _TOOL_STATUS_MESSAGES.get(
+                                        tool_name, f"Running {tool_name}..."
+                                    )
+                                    yield {"type": "status", "message": friendly}
+                                    # Clear the matched portion from buffer
+                                    streaming_buffer = streaming_buffer[match.end():]
 
                 elif state in ("completed", "failed"):
                     got_result = True
@@ -465,6 +486,8 @@ async def send_message_streaming(message_text: str, context_id: Optional[str] = 
         yield {"type": "error", "message": "Empty response from AgentCore"}
         return
 
+    # Strip [TOOL_STATUS:...] markers, then extract charts
+    full_text = strip_tool_status_markers(full_text)
     cleaned_text, chart_artifacts = extract_chart_configs(full_text)
     artifacts = chart_artifacts if chart_artifacts else []
     if chart_artifacts:
@@ -556,8 +579,9 @@ async def chat(
             context_id=context_id,
         )
 
-        # Extract text from A2A response format
+        # Extract text from A2A response format and strip status markers
         text = _extract_text_from_result(result) if isinstance(result, dict) else ""
+        text = strip_tool_status_markers(text)
 
         # Extract chart markers from text and create frontend-format artifacts
         cleaned_text, chart_artifacts = extract_chart_configs(text)
