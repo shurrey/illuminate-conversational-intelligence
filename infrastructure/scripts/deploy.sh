@@ -71,17 +71,17 @@ echo -e "${GREEN}✓ Lambda packaged and uploaded${NC}"
 # 3. Deploy API Lambda + Function URL
 # ===========================================
 
-echo -e "\n${YELLOW}Looking up Orchestrator endpoint URL from SSM...${NC}"
-ORCHESTRATOR_URL=$(aws ssm get-parameter \
-  --name "/illuminate/${ENVIRONMENT}/orchestrator-url" \
+echo -e "\n${YELLOW}Looking up Orchestrator ARN from SSM...${NC}"
+ORCHESTRATOR_ARN=$(aws ssm get-parameter \
+  --name "/illuminate/${ENVIRONMENT}/orchestrator-arn" \
   --query 'Parameter.Value' --output text --region "$REGION" 2>/dev/null || echo "")
 
-if [ -z "$ORCHESTRATOR_URL" ]; then
-  echo -e "${RED}ERROR: Orchestrator URL not found in SSM. Deploy agents first:${NC}"
+if [ -z "$ORCHESTRATOR_ARN" ]; then
+  echo -e "${RED}ERROR: Orchestrator ARN not found in SSM. Deploy agents first:${NC}"
   echo -e "${RED}  cd infrastructure && ./agentcore-deploy.sh${NC}"
   exit 1
 fi
-echo -e "Orchestrator URL: ${YELLOW}$ORCHESTRATOR_URL${NC}"
+echo -e "Orchestrator ARN: ${YELLOW}$ORCHESTRATOR_ARN${NC}"
 
 echo -e "\n${YELLOW}Deploying API stack...${NC}"
 aws cloudformation deploy \
@@ -90,7 +90,7 @@ aws cloudformation deploy \
   --parameter-overrides \
     Environment="$ENVIRONMENT" \
     BaseStackName="$BASE_STACK" \
-    OrchestratorEndpointUrl="$ORCHESTRATOR_URL" \
+    OrchestratorArn="$ORCHESTRATOR_ARN" \
   --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   --region "$REGION"

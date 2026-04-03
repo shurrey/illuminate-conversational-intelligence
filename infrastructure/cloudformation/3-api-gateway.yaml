@@ -11,9 +11,9 @@ Parameters:
     Type: String
     Default: illuminate-base-dev
 
-  OrchestratorEndpointUrl:
+  OrchestratorArn:
     Type: String
-    Description: 'HTTPS URL for the Orchestrator AgentCore A2A endpoint (from SSM or agentcore deploy output).'
+    Description: 'ARN of the Orchestrator AgentCore runtime (from SSM /illuminate/$ENV/orchestrator-arn).'
 
   FrontendOrigin:
     Type: String
@@ -110,7 +110,7 @@ Resources:
           AWS_LWA_READINESS_CHECK_PATH: '/health'
           AWS_LWA_INVOKE_MODE: 'response_stream'
           ILLUMINATE_USE_A2A: 'true'
-          ORCHESTRATOR_ENDPOINT_URL: !Ref OrchestratorEndpointUrl
+          ORCHESTRATOR_ARN: !Ref OrchestratorArn
           ARTIFACTS_BUCKET:
             Fn::ImportValue: !Sub '${BaseStackName}-ArtifactsBucket'
           USER_POOL_ID:

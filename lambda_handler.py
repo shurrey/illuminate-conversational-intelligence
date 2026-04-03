@@ -8,9 +8,14 @@ Uses Lambda Web Adapter (LWA) to run FastAPI/uvicorn inside Lambda, enabling
 real SSE streaming via RESPONSE_STREAM Function URL invoke mode. LWA proxies
 incoming Lambda invocations to the local uvicorn server and streams bytes back.
 
+Calls the orchestrator via boto3 invoke_agent_runtime (SigV4 auth). Streaming
+requests use accept=text/event-stream to get real-time SSE events — tool calls
+are mapped to user-friendly status messages so the frontend can show progress.
+
 Request flow:
     Frontend -> Lambda Function URL (RESPONSE_STREAM) -> LWA -> uvicorn/FastAPI
-        -> Orchestrator AgentCore (A2A) -> SQL, Analyst, Writer, Validator
+        -> boto3 invoke_agent_runtime (SigV4) -> Orchestrator AgentCore (A2A)
+        -> SQL, Analyst, Writer, Validator
 """
 import os
 import json
@@ -93,7 +98,7 @@ def extract_chart_configs(text: str) -> tuple[str, list[dict]]:
 # Configuration from environment variables
 # =============================================================================
 
-ORCHESTRATOR_ENDPOINT_URL = os.environ.get("ORCHESTRATOR_ENDPOINT_URL", "")
+ORCHESTRATOR_ARN = os.environ.get("ORCHESTRATOR_ARN", "")
 USER_POOL_ID = os.environ.get("USER_POOL_ID", "")
 USER_POOL_CLIENT_ID = os.environ.get("USER_POOL_CLIENT_ID", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -101,7 +106,7 @@ ACCOUNT_ID = os.environ.get("ACCOUNT_ID", "442606396405")
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
 
 # A2A protocol timeout (seconds) - agent queries can be slow
-A2A_TIMEOUT = float(os.environ.get("A2A_TIMEOUT", "300"))
+A2A_TIMEOUT = int(os.environ.get("A2A_TIMEOUT", "300"))
 
 
 # =============================================================================
@@ -233,169 +238,246 @@ class HealthResponse(BaseModel):
 
 
 # =============================================================================
-# A2A Client for AgentCore Communication
+# A2A Client for AgentCore Communication (boto3 / SigV4)
 # =============================================================================
 
-class AgentCoreA2AClient:
+# Module-level boto3 client — created once per Lambda cold start.
+# SigV4 auth is handled automatically by the Lambda execution role.
+from botocore.config import Config as BotoConfig
+
+_agentcore_boto3 = boto3.client(
+    "bedrock-agentcore",
+    region_name=AWS_REGION,
+    config=BotoConfig(
+        read_timeout=A2A_TIMEOUT,
+        connect_timeout=10,
+        retries={"max_attempts": 1},
+    ),
+)
+logger.info(f"boto3 bedrock-agentcore client created (timeout={A2A_TIMEOUT}s)")
+
+
+# Tool-name → user-friendly status message
+_TOOL_STATUS = {
+    "query_database": "Querying Snowflake database...",
+    "list_objects": "Discovering database tables...",
+    "describe_object": "Reading table schema...",
+    "run_snowflake_query": "Executing SQL query...",
+    "analyze_data": "Analyzing results...",
+    "write_response": "Preparing response...",
+    "validate_response": "Validating for compliance...",
+}
+
+
+def _build_a2a_request(method: str, message_text: str, context_id: Optional[str] = None) -> dict:
+    """Build a JSON-RPC A2A request payload."""
+    return {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": {
+            "message": {
+                "role": "user",
+                "parts": [{"kind": "text", "text": message_text}],
+                "messageId": str(uuid.uuid4()),
+                "contextId": context_id or str(uuid.uuid4()),
+            }
+        },
+        "id": str(uuid.uuid4()),
+    }
+
+
+def _invoke_orchestrator_sync(message_text: str, context_id: Optional[str] = None) -> dict:
+    """Invoke orchestrator via boto3 (synchronous, JSON response)."""
+    payload = _build_a2a_request("message/send", message_text, context_id)
+    response = _agentcore_boto3.invoke_agent_runtime(
+        agentRuntimeArn=ORCHESTRATOR_ARN,
+        contentType="application/json",
+        accept="application/json",
+        payload=json.dumps(payload).encode(),
+    )
+    body = json.loads(response["response"].read().decode())
+    logger.info(f"AgentCore sync response keys: {list(body.keys())}")
+    if "error" in body:
+        raise Exception(body["error"].get("message", "AgentCore error"))
+    return body.get("result", body)
+
+
+def _invoke_orchestrator_stream(message_text: str, context_id: Optional[str] = None):
+    """Invoke orchestrator via boto3 with SSE streaming. Yields raw SSE data strings."""
+    payload = _build_a2a_request("message/stream", message_text, context_id)
+    response = _agentcore_boto3.invoke_agent_runtime(
+        agentRuntimeArn=ORCHESTRATOR_ARN,
+        contentType="application/json",
+        accept="text/event-stream",
+        payload=json.dumps(payload).encode(),
+    )
+
+    # The response body is a botocore StreamingBody — read SSE lines incrementally
+    stream = response["response"]
+    buffer = ""
+    while True:
+        chunk = stream.read(4096)
+        if not chunk:
+            break
+        buffer += chunk.decode("utf-8", errors="replace")
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.strip()
+            if line.startswith("data:"):
+                yield line[5:].strip()
+
+
+def _extract_text_from_result(result: dict) -> str:
+    """Extract text content from an A2A result dict."""
+    text = ""
+    for artifact in result.get("artifacts", []):
+        for part in artifact.get("parts", []):
+            if part.get("kind") == "text" and part.get("text"):
+                text += part["text"]
+    if not text:
+        for msg in reversed(result.get("history", [])):
+            if msg.get("role") == "agent":
+                for part in msg.get("parts", []):
+                    if part.get("kind") == "text":
+                        text += part.get("text", "")
+                if text:
+                    break
+    return text
+
+
+async def send_message(message_text: str, context_id: Optional[str] = None) -> dict:
+    """Send a message to the orchestrator (non-streaming) via boto3."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, lambda: _invoke_orchestrator_sync(message_text, context_id)
+    )
+
+
+async def send_message_streaming(message_text: str, context_id: Optional[str] = None):
+    """Stream A2A events from the orchestrator via boto3, yielding frontend events.
+
+    Yields events in the format expected by the frontend:
+    - {type: "status", message: "..."}
+    - {type: "complete", data: {text, artifacts, contextId}}
+    - {type: "error", message: "..."}
     """
-    Lightweight A2A client for forwarding requests to the Orchestrator
-    AgentCore runtime endpoint.
+    import asyncio
+    import queue
 
-    When agents are configured with OAuth authorization, the AWS SDK cannot be
-    used for invoke_agent_runtime.  Instead we make direct HTTPS POST requests
-    and pass the user's JWT in the Authorization header.
-    """
+    yield {"type": "status", "message": "Routing to orchestrator..."}
 
-    def __init__(self, endpoint_url: str, timeout: float = 300.0):
-        self.timeout = timeout
-        # Ensure the endpoint URL ends with /invocations
-        self._endpoint_url = endpoint_url.rstrip("/")
-        if not self._endpoint_url.endswith("/invocations"):
-            self._endpoint_url += "/invocations"
-        # OAuth HTTPS calls require accountId as a query parameter
-        self._endpoint_url += f"?accountId={ACCOUNT_ID}&qualifier=DEFAULT"
-        logger.info(f"AgentCore client initialized with URL: {self._endpoint_url}")
+    full_text = ""
+    result_context_id = None
+    got_result = False
+    loop = asyncio.get_event_loop()
 
-    def _build_a2a_request(self, method: str, message_text: str, context_id: Optional[str] = None) -> dict:
-        return {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": {
-                "message": {
-                    "role": "user",
-                    "parts": [{"kind": "text", "text": message_text}],
-                    "messageId": str(uuid.uuid4()),
-                    "contextId": context_id or str(uuid.uuid4())
-                }
-            },
-            "id": str(uuid.uuid4())
-        }
+    try:
+        # Stream SSE events from boto3 in a background thread via queue
+        event_queue: queue.Queue = queue.Queue()
 
-    def _invoke_https(self, payload: bytes, auth_token: Optional[str] = None) -> bytes:
-        """Make a direct HTTPS POST to the AgentCore runtime endpoint."""
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
-        if auth_token:
-            headers["Authorization"] = f"Bearer {auth_token}"
+        def _stream_to_queue():
+            try:
+                for data_str in _invoke_orchestrator_stream(message_text, context_id):
+                    event_queue.put(data_str)
+            except Exception as e:
+                event_queue.put(json.dumps({"error": {"message": str(e)}}))
+            finally:
+                event_queue.put(None)  # sentinel
 
-        resp = http_requests.post(
-            self._endpoint_url,
-            data=payload,
-            headers=headers,
-            timeout=self.timeout,
-        )
+        loop.run_in_executor(None, _stream_to_queue)
 
-        logger.info(f"AgentCore response status={resp.status_code}, body={resp.text[:1000]}")
+        while True:
+            try:
+                data_str = await asyncio.wait_for(
+                    loop.run_in_executor(None, lambda: event_queue.get(timeout=0.5)),
+                    timeout=1.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                continue
 
-        if resp.status_code >= 400:
-            raise Exception(f"AgentCore returned {resp.status_code}: {resp.text[:500]}")
+            if data_str is None:
+                break
 
-        return resp.content
+            try:
+                event = json.loads(data_str)
+            except json.JSONDecodeError:
+                continue
 
-    async def send_message(
-        self,
-        message_text: str,
-        context_id: Optional[str] = None,
-        auth_token: Optional[str] = None
-    ) -> dict:
-        """Send a message to the Orchestrator via HTTPS."""
-        import asyncio
+            result = event.get("result", {})
+            if not isinstance(result, dict):
+                continue
 
-        a2a_request = self._build_a2a_request("message/send", message_text, context_id)
-        payload = json.dumps(a2a_request).encode('utf-8')
+            kind = result.get("kind", "")
+            result_context_id = result.get("contextId") or result_context_id
 
-        logger.info(f"Invoking AgentCore runtime: {self._endpoint_url}")
+            if kind == "status-update":
+                status = result.get("status", {})
+                state = status.get("state", "")
 
-        loop = asyncio.get_event_loop()
-        response_body = await loop.run_in_executor(
-            None, lambda: self._invoke_https(payload, auth_token)
-        )
+                if state == "working":
+                    # Token-by-token text chunks from the orchestrator
+                    msg = status.get("message", {})
+                    if isinstance(msg, dict):
+                        for part in msg.get("parts", []):
+                            chunk = part.get("text", "")
+                            if chunk:
+                                # Check for tool name mentions (from orchestrator's internal logging)
+                                for tool_name, friendly_msg in _TOOL_STATUS.items():
+                                    if tool_name in chunk.lower():
+                                        yield {"type": "status", "message": friendly_msg}
+                                        break
 
-        logger.info(f"AgentCore response length: {len(response_body)}")
+                elif state in ("completed", "failed"):
+                    got_result = True
 
-        result = json.loads(response_body.decode('utf-8'))
-        logger.info(f"AgentCore response keys: {list(result.keys())}")
+            elif kind == "artifact-update":
+                # Full response text arrives in artifact-update event
+                artifact = result.get("artifact", {})
+                for part in artifact.get("parts", []):
+                    if part.get("kind") == "text" and part.get("text"):
+                        full_text += part["text"]
 
-        if "error" in result:
-            error = result["error"]
-            raise Exception(error.get("message", "AgentCore error"))
-
-        return result.get("result", result)
-
-    async def send_message_streaming(
-        self,
-        message_text: str,
-        context_id: Optional[str] = None,
-        auth_token: Optional[str] = None
-    ):
-        """Send a message and stream response events from AgentCore.
-
-        Yields events in the format expected by the frontend:
-        - {type: "status", message: "..."}
-        - {type: "complete", data: {text, artifacts, contextId}}
-        - {type: "error", message: "..."}
-        """
-        import asyncio
-
-        # Emit a status event so the frontend shows progress
-        yield {"type": "status", "message": "Querying agents..."}
-
-        a2a_request = self._build_a2a_request("message/send", message_text, context_id)
-        payload = json.dumps(a2a_request).encode('utf-8')
-
-        logger.info(f"Invoking AgentCore runtime (streaming): {self._endpoint_url}")
-
-        loop = asyncio.get_event_loop()
-        response_body = await loop.run_in_executor(
-            None, lambda: self._invoke_https(payload, auth_token)
-        )
-
-        if response_body:
-            result = json.loads(response_body.decode('utf-8'))
-            a2a_result = result.get("result", result)
-
-            if "error" in result:
-                yield {"type": "error", "message": result["error"].get("message", "AgentCore error")}
+            # Check for JSON-RPC error
+            if "error" in event:
+                error_msg = event["error"]
+                if isinstance(error_msg, dict):
+                    error_msg = error_msg.get("message", "AgentCore error")
+                yield {"type": "error", "message": str(error_msg)}
                 return
 
-            # Extract text from A2A response
-            text = ""
-            if isinstance(a2a_result, dict):
-                # Try artifacts first
-                for artifact in a2a_result.get("artifacts", []):
-                    for part in artifact.get("parts", []):
-                        if part.get("kind") == "text" or part.get("type") == "text":
-                            text += part.get("text", "")
-                # Fallback to history
-                if not text:
-                    for msg in reversed(a2a_result.get("history", [])):
-                        if msg.get("role") == "agent":
-                            for part in msg.get("parts", []):
-                                if part.get("kind") == "text":
-                                    text += part.get("text", "")
-                            if text:
-                                break
+    except Exception as e:
+        logger.error(f"Streaming failed, falling back to synchronous: {e}")
+        yield {"type": "status", "message": "Processing request..."}
+        try:
+            result = await loop.run_in_executor(
+                None, lambda: _invoke_orchestrator_sync(message_text, context_id)
+            )
+            if isinstance(result, dict):
+                full_text = _extract_text_from_result(result)
+                result_context_id = result.get("contextId")
+                got_result = True
+        except Exception as fallback_err:
+            yield {"type": "error", "message": str(fallback_err)}
+            return
 
-            # Extract chart markers from text and create frontend-format artifacts
-            cleaned_text, chart_artifacts = extract_chart_configs(text)
-            # Only include frontend-format artifacts (with 'type' field), not raw A2A artifacts
-            artifacts = chart_artifacts if chart_artifacts else []
-            if chart_artifacts:
-                logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into streaming response")
+    if not full_text and not got_result:
+        yield {"type": "error", "message": "Empty response from AgentCore"}
+        return
 
-            # Emit the complete event in the format the frontend expects
-            yield {
-                "type": "complete",
-                "data": {
-                    "text": cleaned_text,
-                    "artifacts": artifacts,
-                    "contextId": a2a_result.get("contextId") if isinstance(a2a_result, dict) else None,
-                }
-            }
-        else:
-            yield {"type": "error", "message": "Empty response from AgentCore"}
+    cleaned_text, chart_artifacts = extract_chart_configs(full_text)
+    artifacts = chart_artifacts if chart_artifacts else []
+    if chart_artifacts:
+        logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into streaming response")
+
+    yield {
+        "type": "complete",
+        "data": {
+            "text": cleaned_text,
+            "artifacts": artifacts,
+            "contextId": result_context_id,
+        },
+    }
 
 
 # =============================================================================
@@ -418,32 +500,13 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-# A2A client singleton
-_a2a_client: Optional[AgentCoreA2AClient] = None
-
-
-def _get_a2a_client() -> AgentCoreA2AClient:
-    """Get or create the A2A client for AgentCore communication."""
-    global _a2a_client
-    if _a2a_client is None:
-        if not ORCHESTRATOR_ENDPOINT_URL:
-            raise RuntimeError(
-                "ORCHESTRATOR_ENDPOINT_URL environment variable is not set. "
-                "Cannot forward requests to AgentCore."
-            )
-        _a2a_client = AgentCoreA2AClient(
-            endpoint_url=ORCHESTRATOR_ENDPOINT_URL,
-            timeout=A2A_TIMEOUT
+def _ensure_orchestrator_configured():
+    """Fail fast if ORCHESTRATOR_ARN is not set."""
+    if not ORCHESTRATOR_ARN:
+        raise RuntimeError(
+            "ORCHESTRATOR_ARN environment variable is not set. "
+            "Cannot forward requests to AgentCore."
         )
-    return _a2a_client
-
-
-def _extract_bearer_token(authorization: str) -> Optional[str]:
-    """Extract the raw token from Authorization header."""
-    parts = authorization.split()
-    if len(parts) == 2 and parts[0].lower() == "bearer":
-        return parts[1]
-    return None
 
 
 # Track cancelled request IDs
@@ -486,26 +549,18 @@ async def chat(
     logger.info(f"Chat request: message='{message_text[:100]}...', context_id={context_id}")
 
     try:
-        client = _get_a2a_client()
-        token = _extract_bearer_token(authorization)
+        _ensure_orchestrator_configured()
 
-        result = await client.send_message(
+        result = await send_message(
             message_text=message_text,
             context_id=context_id,
-            auth_token=token
         )
 
         # Extract text from A2A response format
-        text = result.get("text", "")
-        if not text and "artifacts" in result:
-            for artifact in result["artifacts"]:
-                for part in artifact.get("parts", []):
-                    if part.get("kind") == "text" or part.get("type") == "text":
-                        text += part.get("text", "")
+        text = _extract_text_from_result(result) if isinstance(result, dict) else ""
 
         # Extract chart markers from text and create frontend-format artifacts
         cleaned_text, chart_artifacts = extract_chart_configs(text)
-        # Only include frontend-format artifacts (with 'type' field), not raw A2A artifacts
         artifacts = chart_artifacts if chart_artifacts else []
         if chart_artifacts:
             logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into response")
@@ -513,8 +568,8 @@ async def chat(
         return ChatResponse(
             text=cleaned_text,
             artifacts=artifacts,
-            context_id=result.get("contextId", result.get("context_id", context_id)),
-            sources=result.get("sources")
+            context_id=result.get("contextId", result.get("context_id", context_id)) if isinstance(result, dict) else context_id,
+            sources=result.get("sources") if isinstance(result, dict) else None,
         )
 
     except Exception as e:
@@ -552,13 +607,11 @@ async def chat_stream(
     async def event_generator():
         """Relay SSE events from AgentCore to the frontend."""
         try:
-            client = _get_a2a_client()
-            token = _extract_bearer_token(authorization)
+            _ensure_orchestrator_configured()
 
-            async for event in client.send_message_streaming(
+            async for event in send_message_streaming(
                 message_text=message_text,
                 context_id=context_id,
-                auth_token=token
             ):
                 # Check if request was cancelled
                 if request_id and request_id in _cancelled_requests:

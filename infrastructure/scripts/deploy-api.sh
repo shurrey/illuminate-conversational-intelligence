@@ -69,28 +69,28 @@ echo -e "${GREEN}Uploaded to s3://${BUCKET}/lambda/api-handler.zip${NC}"
 # Discover Orchestrator endpoint URL from SSM
 # ===========================================
 
-echo -e "\n${YELLOW}Looking up Orchestrator endpoint URL from SSM...${NC}"
-ORCHESTRATOR_URL=$(aws ssm get-parameter \
-  --name "/illuminate/${ENVIRONMENT}/orchestrator-url" \
+echo -e "\n${YELLOW}Looking up Orchestrator ARN from SSM...${NC}"
+ORCHESTRATOR_ARN=$(aws ssm get-parameter \
+  --name "/illuminate/${ENVIRONMENT}/orchestrator-arn" \
   --query 'Parameter.Value' --output text --region "$REGION" 2>/dev/null || echo "")
 
-if [ -z "$ORCHESTRATOR_URL" ]; then
-  echo -e "${RED}WARNING: Orchestrator URL not found in SSM at /illuminate/${ENVIRONMENT}/orchestrator-url${NC}"
-  echo -e "${RED}Run infrastructure/agentcore-deploy.sh first to deploy agents and store URLs.${NC}"
-  echo -e "${YELLOW}Continuing with empty URL - you can set it manually via CloudFormation parameter override.${NC}"
+if [ -z "$ORCHESTRATOR_ARN" ]; then
+  echo -e "${RED}WARNING: Orchestrator ARN not found in SSM at /illuminate/${ENVIRONMENT}/orchestrator-arn${NC}"
+  echo -e "${RED}Run infrastructure/agentcore-deploy.sh first to deploy agents.${NC}"
+  echo -e "${YELLOW}Continuing with empty ARN - you can set it manually via CloudFormation parameter override.${NC}"
 fi
 
-echo -e "Orchestrator URL: ${ORCHESTRATOR_URL:-'(not set)'}"
+echo -e "Orchestrator ARN: ${ORCHESTRATOR_ARN:-'(not set)'}"
 
 # ===========================================
 # Deploy CloudFormation stack
 # ===========================================
 
 echo -e "\n${YELLOW}Deploying API Gateway stack...${NC}"
-if [ -z "$ORCHESTRATOR_URL" ]; then
-  echo -e "${RED}ERROR: Orchestrator URL not found. Cannot deploy API without it.${NC}"
-  echo -e "${RED}Run 'agentcore deploy' for the orchestrator first, then store the URL:${NC}"
-  echo -e "${RED}  aws ssm put-parameter --name /illuminate/$ENVIRONMENT/orchestrator-url --value <URL> --type String --overwrite${NC}"
+if [ -z "$ORCHESTRATOR_ARN" ]; then
+  echo -e "${RED}ERROR: Orchestrator ARN not found. Cannot deploy API without it.${NC}"
+  echo -e "${RED}Run 'agentcore deploy' for the orchestrator first, then store the ARN:${NC}"
+  echo -e "${RED}  aws ssm put-parameter --name /illuminate/$ENVIRONMENT/orchestrator-arn --value <ARN> --type String --overwrite${NC}"
   exit 1
 fi
 
@@ -100,7 +100,7 @@ FRONTEND_ORIGIN=$(aws cloudformation describe-stacks --stack-name "$FRONTEND_STA
   --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontURL`].OutputValue' \
   --output text --region "$REGION" 2>/dev/null || echo "")
 
-PARAM_OVERRIDES="Environment=$ENVIRONMENT BaseStackName=$BASE_STACK OrchestratorEndpointUrl=$ORCHESTRATOR_URL"
+PARAM_OVERRIDES="Environment=$ENVIRONMENT BaseStackName=$BASE_STACK OrchestratorArn=$ORCHESTRATOR_ARN"
 if [ -n "$FRONTEND_ORIGIN" ]; then
   PARAM_OVERRIDES="$PARAM_OVERRIDES FrontendOrigin=$FRONTEND_ORIGIN"
   echo -e "Frontend origin: ${YELLOW}$FRONTEND_ORIGIN${NC}"

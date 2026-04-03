@@ -13,22 +13,6 @@ AGENTCORE="$(python3 -c "import sysconfig, os; p=os.path.join(sysconfig.get_path
   || { echo "ERROR: bedrock-agentcore-starter-toolkit not found. Install with: pip install bedrock-agentcore-starter-toolkit"; exit 1; }
 echo "Using agentcore CLI: $AGENTCORE"
 
-# Get Cognito configuration from base stack
-USER_POOL_ID=$(aws cloudformation describe-stacks \
-  --stack-name illuminate-base-$ENVIRONMENT \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' \
-  --output text)
-
-CLIENT_ID=$(aws cloudformation describe-stacks \
-  --stack-name illuminate-base-$ENVIRONMENT \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' \
-  --output text)
-
-ISSUER_URL="https://cognito-idp.us-east-1.amazonaws.com/$USER_POOL_ID"
-
-echo "Using Cognito User Pool: $USER_POOL_ID"
-echo "Using Client ID: $CLIENT_ID"
-
 # Get Snowflake secret ARN
 SECRET_ARN=$(aws cloudformation describe-stacks \
   --stack-name illuminate-base-$ENVIRONMENT \
@@ -71,7 +55,7 @@ PERMISSIONS_POLICY=$(cat <<EOF
         "bedrock:InvokeModelWithResponseStream"
       ],
       "Resource": [
-        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-*",
+        "arn:aws:bedrock:*::foundation-model/anthropic.claude-*",
         "arn:aws:bedrock:*:$ACCOUNT_ID:inference-profile/us.anthropic.claude-*"
       ]
     },
@@ -87,9 +71,39 @@ PERMISSIONS_POLICY=$(cat <<EOF
       "Action": [
         "logs:CreateLogGroup",
         "logs:CreateLogStream",
-        "logs:PutLogEvents"
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
       ],
       "Resource": "arn:aws:logs:us-east-1:$ACCOUNT_ID:log-group:/aws/bedrock-agentcore/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:InvokeAgentRuntime"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:us-east-1:$ACCOUNT_ID:runtime/illuminate_*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetBucketLocation",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::bedrock-agentcore-codebuild-sources-$ACCOUNT_ID-us-east-1",
+        "arn:aws:s3:::bedrock-agentcore-codebuild-sources-$ACCOUNT_ID-us-east-1/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "*"
     }
   ]
 }
@@ -124,19 +138,6 @@ ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
 echo "✓ IAM role ready: $ROLE_ARN"
 echo ""
 
-# Create OAuth authorizer config JSON
-# Note: allowedAudience is omitted because Cognito access tokens use the
-# 'client_id' claim (matched by allowedClients) rather than 'aud'.
-AUTH_CONFIG=$(cat <<EOF
-{
-  "customJWTAuthorizer": {
-    "discoveryUrl": "$ISSUER_URL/.well-known/openid-configuration",
-    "allowedClients": ["$CLIENT_ID"]
-  }
-}
-EOF
-)
-
 # Helper: launch agent and extract ARN
 # Prints full output to stderr for visibility, returns just the ARN on stdout
 launch_and_get_arn() {
@@ -151,7 +152,8 @@ echo "Deploying SQL Agent..."
 cd ../agents/sql
 $AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
   --name "illuminate_sql_$ENVIRONMENT" \
-  --execution-role "$ROLE_ARN"
+  --execution-role "$ROLE_ARN" \
+  --deployment-type container
 SQL_ARN=$(launch_and_get_arn)
 if [ -z "$SQL_ARN" ]; then
   echo "Failed to get SQL ARN"
@@ -166,7 +168,8 @@ echo "Deploying Analyst Agent..."
 cd ../analyst
 $AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
   --name "illuminate_analyst_$ENVIRONMENT" \
-  --execution-role "$ROLE_ARN"
+  --execution-role "$ROLE_ARN" \
+  --deployment-type container
 ANALYST_ARN=$(launch_and_get_arn)
 if [ -z "$ANALYST_ARN" ]; then
   echo "Failed to get Analyst ARN"
@@ -181,7 +184,8 @@ echo "Deploying Writer Agent..."
 cd ../writer
 $AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
   --name "illuminate_writer_$ENVIRONMENT" \
-  --execution-role "$ROLE_ARN"
+  --execution-role "$ROLE_ARN" \
+  --deployment-type container
 WRITER_ARN=$(launch_and_get_arn)
 if [ -z "$WRITER_ARN" ]; then
   echo "Failed to get Writer ARN"
@@ -196,7 +200,8 @@ echo "Deploying Validator Agent..."
 cd ../validator
 $AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
   --name "illuminate_validator_$ENVIRONMENT" \
-  --execution-role "$ROLE_ARN"
+  --execution-role "$ROLE_ARN" \
+  --deployment-type container
 VALIDATOR_ARN=$(launch_and_get_arn)
 if [ -z "$VALIDATOR_ARN" ]; then
   echo "Failed to get Validator ARN"
@@ -235,8 +240,9 @@ VALIDATOR_AGENT_ARN=$VALIDATOR_ARN
 EOF
 
 $AGENTCORE configure -e a2a_server.py --protocol A2A --non-interactive \
-  --authorizer-config "$AUTH_CONFIG" --name "illuminate_orchestrator_$ENVIRONMENT" \
-  --execution-role "$ROLE_ARN"
+  --name "illuminate_orchestrator_$ENVIRONMENT" \
+  --execution-role "$ROLE_ARN" \
+  --deployment-type container
 ORCHESTRATOR_ARN=$(launch_and_get_arn)
 if [ -z "$ORCHESTRATOR_ARN" ]; then
   echo "Failed to get Orchestrator ARN"
