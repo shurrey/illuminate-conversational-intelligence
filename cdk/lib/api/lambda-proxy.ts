@@ -1,0 +1,139 @@
+import { Construct } from 'constructs';
+import * as cdk from 'aws-cdk-lib';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as path from 'path';
+
+export interface LambdaProxyProps {
+  environment: string;
+  vpc: ec2.IVpc;
+  securityGroup: ec2.ISecurityGroup;
+  orchestratorArn: string;
+  userPoolId: string;
+  userPoolClientId: string;
+  artifactsBucketName: string;
+  snowflakeSecretArn: string;
+  /** CloudFront origin URL to add to CORS allowed origins */
+  frontendOrigin?: string;
+}
+
+export class LambdaProxy extends Construct {
+  public readonly fn: lambda.Function;
+  public readonly functionUrl: lambda.FunctionUrl;
+
+  constructor(scope: Construct, id: string, props: LambdaProxyProps) {
+    super(scope, id);
+
+    const isProd = props.environment === 'prod';
+    const projectRoot = path.resolve(__dirname, '..', '..', '..');
+
+    // Lambda execution role
+    const role = new iam.Role(this, 'Role', {
+      roleName: `illuminate-lambda-${props.environment}`,
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+      ],
+    });
+
+    // AgentCore invocation
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+      resources: [
+        `arn:aws:bedrock-agentcore:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:runtime/illuminate_orchestrator_*`,
+      ],
+    }));
+
+    // Secrets Manager
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [props.snowflakeSecretArn],
+    }));
+
+    // S3
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject', 's3:PutObject'],
+      resources: [`arn:aws:s3:::${props.artifactsBucketName}/*`],
+    }));
+
+    // Cognito
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:GetUser', 'cognito-idp:AdminGetUser'],
+      resources: [
+        `arn:aws:cognito-idp:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:userpool/${props.userPoolId}`,
+      ],
+    }));
+
+    // Build CORS allowed origins
+    const defaultOrigins = isProd
+      ? 'https://illuminate.anthology.com'
+      : 'http://localhost:3000,http://localhost:5173';
+    const allowedOrigins = props.frontendOrigin
+      ? `${defaultOrigins},${props.frontendOrigin}`
+      : defaultOrigins;
+
+    // Lambda Web Adapter layer
+    const lwaLayer = lambda.LayerVersion.fromLayerVersionArn(this, 'LWA',
+      `arn:aws:lambda:${cdk.Aws.REGION}:753240598075:layer:LambdaAdapterLayerX86:27`,
+    );
+
+    this.fn = new lambda.Function(this, 'Function', {
+      functionName: `illuminate-api-${props.environment}`,
+      runtime: lambda.Runtime.PYTHON_3_11,
+      handler: 'run.sh',
+      role,
+      timeout: cdk.Duration.seconds(900),
+      memorySize: 1024,
+      layers: [lwaLayer],
+      code: lambda.Code.fromAsset(projectRoot, {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_11.bundlingImage,
+          command: [
+            'bash', '-c', [
+              'pip install -q -t /asset-output --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: -r requirements-lambda.txt',
+              'cp lambda_handler.py run.sh /asset-output/',
+            ].join(' && '),
+          ],
+        },
+      }),
+      vpc: props.vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [props.securityGroup],
+      environment: {
+        AWS_LAMBDA_EXEC_WRAPPER: '/opt/bootstrap',
+        PORT: '8080',
+        AWS_LWA_READINESS_CHECK_PATH: '/health',
+        AWS_LWA_INVOKE_MODE: 'response_stream',
+        ILLUMINATE_USE_A2A: 'true',
+        ORCHESTRATOR_ARN: props.orchestratorArn,
+        ARTIFACTS_BUCKET: props.artifactsBucketName,
+        USER_POOL_ID: props.userPoolId,
+        USER_POOL_CLIENT_ID: props.userPoolClientId,
+        ALLOWED_ORIGINS: allowedOrigins,
+        ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
+        A2A_TIMEOUT: '300',
+        LOG_LEVEL: isProd ? 'WARN' : 'INFO',
+      },
+    });
+
+    // Function URL with response streaming
+    this.functionUrl = this.fn.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.NONE,
+      invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
+    });
+
+    // Log group
+    new logs.LogGroup(this, 'LogGroup', {
+      logGroupName: `/aws/lambda/${this.fn.functionName}`,
+      retention: isProd ? logs.RetentionDays.ONE_MONTH : logs.RetentionDays.ONE_WEEK,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+  }
+
+  /** Extract the domain from the Function URL (for CloudFront origin) */
+  get functionUrlDomain(): string {
+    return cdk.Fn.select(2, cdk.Fn.split('/', this.functionUrl.url));
+  }
+}
