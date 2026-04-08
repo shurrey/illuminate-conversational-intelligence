@@ -167,6 +167,15 @@ USER_POOL_CLIENT_ID = os.environ.get("USER_POOL_CLIENT_ID", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 ACCOUNT_ID = os.environ.get("ACCOUNT_ID", "442606396405")
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
+SNOWFLAKE_SECRET_NAME = os.environ.get("SNOWFLAKE_SECRET_NAME", "illuminate/dev/snowflake")
+
+# Data dictionary proxy
+DATA_DICTIONARY_BASE_URL = "https://us.data.api.blackboard.com/api/v1/data/dictionary"
+_dictionary_cache: dict[str, tuple[float, object]] = {}
+DICTIONARY_CACHE_TTL = 3600  # 1 hour
+
+# Input validation for Snowflake identifiers
+_SAFE_IDENTIFIER = re.compile(r'^[A-Za-z0-9_]+$')
 
 # A2A protocol timeout (seconds) - agent queries can be slow
 A2A_TIMEOUT = int(os.environ.get("A2A_TIMEOUT", "300"))
@@ -770,6 +779,110 @@ async def clear_conversation(
 
     logger.info(f"Clear conversation requested for context: {context_id}")
     return {"success": True}
+
+
+# =============================================================================
+# Data Dictionary Endpoints
+# =============================================================================
+
+async def _proxy_dictionary_request(path: str) -> object:
+    """Fetch from the Blackboard data dictionary API with in-memory TTL cache."""
+    import time
+    import asyncio
+
+    cache_key = path
+    if cache_key in _dictionary_cache:
+        cached_time, cached_data = _dictionary_cache[cache_key]
+        if (time.time() - cached_time) < DICTIONARY_CACHE_TTL:
+            return cached_data
+
+    loop = asyncio.get_event_loop()
+    url = f"{DATA_DICTIONARY_BASE_URL}/{path}"
+
+    def _fetch():
+        resp = http_requests.get(url, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    try:
+        data = await loop.run_in_executor(None, _fetch)
+        _dictionary_cache[cache_key] = (time.time(), data)
+        logger.info(f"Cached dictionary data for '{path}'")
+        return data
+    except Exception as e:
+        logger.error(f"Dictionary proxy failed for {path}: {e}")
+        raise HTTPException(status_code=502, detail="Data dictionary service unavailable")
+
+
+@app.get("/api/v1/dictionary/submodels")
+async def dictionary_submodels(authorization: str = Header(...)):
+    """Returns all CDM domains with display names."""
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return await _proxy_dictionary_request("submodels")
+
+
+@app.get("/api/v1/dictionary/definitions")
+async def dictionary_definitions(authorization: str = Header(...)):
+    """Returns all column definitions."""
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return await _proxy_dictionary_request("definitions")
+
+
+@app.get("/api/v1/dictionary/erd")
+async def dictionary_erd(authorization: str = Header(...)):
+    """Returns entity relationships (foreign keys)."""
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    return await _proxy_dictionary_request("erd")
+
+
+@app.get("/api/v1/dictionary/preview")
+async def dictionary_preview(
+    schema: str,
+    table: str,
+    limit: int = 20,
+    authorization: str = Header(...),
+):
+    """Preview sample data from a Snowflake table.
+
+    Returns { columns: string[], rows: Record<string, unknown>[] }.
+    Schema must start with CDM_, limit capped at 100.
+    """
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Validate identifiers
+    if not _SAFE_IDENTIFIER.match(schema) or not _SAFE_IDENTIFIER.match(table):
+        raise HTTPException(status_code=400, detail="Invalid identifier: only alphanumeric and underscore allowed")
+
+    # Whitelist schemas to CDM_* only
+    if not schema.upper().startswith("CDM_"):
+        raise HTTPException(status_code=400, detail="Schema must start with CDM_")
+
+    # Cap limit
+    limit = min(max(1, limit), 100)
+
+    try:
+        import asyncio
+        from snowflake_client import query_preview
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: query_preview(schema.upper(), table.upper(), limit)
+        )
+        logger.info(f"Preview: {schema}.{table} returned {len(result['rows'])} rows")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Snowflake preview query failed: {e}")
+        raise HTTPException(status_code=502, detail="Failed to query sample data")
 
 
 # =============================================================================

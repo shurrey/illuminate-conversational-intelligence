@@ -93,7 +93,7 @@ export class LambdaProxy extends Construct {
           command: [
             'bash', '-c', [
               'pip install -q -t /asset-output --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: -r requirements-lambda.txt',
-              'cp lambda_handler.py run.sh /asset-output/',
+              'cp lambda_handler.py snowflake_client.py run.sh /asset-output/',
             ].join(' && '),
           ],
         },
@@ -114,6 +114,7 @@ export class LambdaProxy extends Construct {
         ALLOWED_ORIGINS: allowedOrigins,
         ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
         A2A_TIMEOUT: '300',
+        SNOWFLAKE_SECRET_NAME: `illuminate/${props.environment}/snowflake`,
         LOG_LEVEL: isProd ? 'WARN' : 'INFO',
       },
     });
