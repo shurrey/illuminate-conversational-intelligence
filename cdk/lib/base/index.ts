@@ -8,6 +8,7 @@ import { Networking } from './networking';
 import { Auth } from './auth';
 import { Storage } from './storage';
 import { Waf } from './waf';
+import { Discovery } from './discovery';
 
 export interface BaseStackProps extends cdk.StackProps {
   environment: string;
@@ -63,5 +64,16 @@ export class BaseStack extends cdk.Stack {
       scope: 'REGIONAL',
     });
     this.webAclArn = waf.webAclArn;
+
+    // Publish discovery parameters to SSM
+    new Discovery(this, 'Discovery', {
+      environment: props.environment,
+      parameters: {
+        'cognito-pool-id': auth.userPool.userPoolId,
+        'cognito-client-id': auth.userPoolClient.userPoolClientId,
+        'artifacts-bucket': storage.artifactsBucket.bucketName,
+        'snowflake-secret-arn': storage.snowflakeSecret.secretArn,
+      },
+    });
   }
 }

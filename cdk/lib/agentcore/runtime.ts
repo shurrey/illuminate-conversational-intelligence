@@ -1,6 +1,7 @@
 import { Construct } from 'constructs';
 import * as bedrockagentcore from 'aws-cdk-lib/aws-bedrockagentcore';
-import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
+import * as ecr_assets from 'aws-cdk-lib/aws-ecr-assets';
+import * as path from 'path';
 
 export interface AgentRuntimeProps {
   /** Runtime name (e.g., "illuminate_sql_dev") */
@@ -18,7 +19,10 @@ export interface AgentRuntimeProps {
 
 /**
  * Reusable construct for a single AgentCore runtime.
- * Packages the agent source as an S3 asset and creates the runtime.
+ * Builds a Docker image from the agent source and deploys as a container runtime.
+ *
+ * Uses a shared Dockerfile at agents/Dockerfile. Each agent directory is the
+ * build context, so COPY . . picks up that agent's source code.
  *
  * Instantiated 5 times: sql, analyst, writer, validator, orchestrator.
  */
@@ -29,18 +33,15 @@ export class AgentRuntime extends Construct {
   constructor(scope: Construct, id: string, props: AgentRuntimeProps) {
     super(scope, id);
 
-    // Package the agent source directory as an S3 asset (zip)
-    const sourceAsset = new s3assets.Asset(this, 'Source', {
-      path: props.sourcePath,
+    // Build Docker image from agent source directory.
+    // Each agent dir has a symlink to the shared agents/Dockerfile.
+    // CDK handles ECR repo creation, image build, and push automatically.
+    const image = new ecr_assets.DockerImageAsset(this, 'Image', {
+      directory: props.sourcePath,
+      platform: ecr_assets.Platform.LINUX_ARM64,
       exclude: [
-        '*.pyc',
-        '__pycache__',
-        '.venv',
-        'venv',
-        '.git',
         '.bedrock_agentcore',
         '.bedrock_agentcore.yaml',
-        '.dockerignore',
         '.env.agentcore',
       ],
     });
@@ -58,15 +59,8 @@ export class AgentRuntime extends Construct {
       description: props.description,
       roleArn: props.roleArn,
       agentRuntimeArtifact: {
-        codeConfiguration: {
-          code: {
-            s3: {
-              bucket: sourceAsset.s3BucketName,
-              prefix: sourceAsset.s3ObjectKey,
-            },
-          },
-          entryPoint: ['a2a_server.py'],
-          runtime: 'PYTHON_3_13',
+        containerConfiguration: {
+          containerUri: image.imageUri,
         },
       },
       protocolConfiguration: 'A2A',

@@ -4,8 +4,8 @@ import * as path from 'path';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { AgentRole } from './roles';
 import { AgentMemory } from './memory';
-import { AgentGateway } from './gateway';
 import { AgentRuntime } from './runtime';
+import { Discovery } from '../base/discovery';
 
 export interface AgentCoreStackProps extends cdk.StackProps {
   environment: string;
@@ -42,17 +42,28 @@ export class AgentCoreStack extends cdk.Stack {
     });
     this.memoryId = memory.memoryId;
 
-    // Gateway for A2A agent communication
-    new AgentGateway(this, 'Gateway', {
-      gatewayName: `illuminate-gateway-${props.environment}`,
-      description: 'Gateway for Illuminate A2A agent communication',
-      roleArn: agentRole.role.roleArn,
-    });
+    // Note: Gateway is not used for A2A agents — agents are invoked directly
+    // via invoke_agent_runtime. Gateway is for MCP tool hosting only.
+    // The gateway construct is kept in lib/agentcore/gateway.ts for future use.
+
+    // Ensure all runtimes wait for the IAM policy to be fully attached.
+    // Without this, AgentCore validates ECR access before the policy exists.
+    const runtimes: AgentRuntime[] = [];
+    const addRuntime = (runtime: AgentRuntime) => {
+      runtime.node.addDependency(agentRole.role);
+      // Also depend on the DefaultPolicy node if it exists
+      const defaultPolicy = agentRole.role.node.tryFindChild('DefaultPolicy');
+      if (defaultPolicy) {
+        runtime.node.addDependency(defaultPolicy);
+      }
+      runtimes.push(runtime);
+      return runtime;
+    };
 
     // Specialist agent runtimes (deployed before orchestrator)
     const snowflakeSecretName = `illuminate/${props.environment}/snowflake`;
 
-    const sql = new AgentRuntime(this, 'SqlAgent', {
+    const sql = addRuntime(new AgentRuntime(this, 'SqlAgent', {
       runtimeName: `illuminate_sql_${props.environment}`,
       description: 'SQL agent - generates and executes Snowflake queries',
       roleArn: agentRole.role.roleArn,
@@ -60,35 +71,35 @@ export class AgentCoreStack extends cdk.Stack {
       environmentVariables: {
         SNOWFLAKE_SECRET_NAME: snowflakeSecretName,
       },
-    });
+    }));
     this.sqlArn = sql.runtimeArn;
 
-    const analyst = new AgentRuntime(this, 'AnalystAgent', {
+    const analyst = addRuntime(new AgentRuntime(this, 'AnalystAgent', {
       runtimeName: `illuminate_analyst_${props.environment}`,
       description: 'Analyst agent - interprets data and identifies patterns',
       roleArn: agentRole.role.roleArn,
       sourcePath: path.join(agentsDir, 'analyst'),
-    });
+    }));
     this.analystArn = analyst.runtimeArn;
 
-    const writer = new AgentRuntime(this, 'WriterAgent', {
+    const writer = addRuntime(new AgentRuntime(this, 'WriterAgent', {
       runtimeName: `illuminate_writer_${props.environment}`,
       description: 'Writer agent - crafts natural language responses',
       roleArn: agentRole.role.roleArn,
       sourcePath: path.join(agentsDir, 'writer'),
-    });
+    }));
     this.writerArn = writer.runtimeArn;
 
-    const validator = new AgentRuntime(this, 'ValidatorAgent', {
+    const validator = addRuntime(new AgentRuntime(this, 'ValidatorAgent', {
       runtimeName: `illuminate_validator_${props.environment}`,
       description: 'Validator agent - ensures FERPA compliance',
       roleArn: agentRole.role.roleArn,
       sourcePath: path.join(agentsDir, 'validator'),
-    });
+    }));
     this.validatorArn = validator.runtimeArn;
 
     // Orchestrator runtime — deployed last with all specialist ARNs
-    const orchestrator = new AgentRuntime(this, 'OrchestratorAgent', {
+    const orchestrator = addRuntime(new AgentRuntime(this, 'OrchestratorAgent', {
       runtimeName: `illuminate_orchestrator_${props.environment}`,
       description: 'Orchestrator agent - coordinates specialist agents',
       roleArn: agentRole.role.roleArn,
@@ -102,7 +113,20 @@ export class AgentCoreStack extends cdk.Stack {
         VALIDATOR_AGENT_ARN: validator.runtimeArn,
         SNOWFLAKE_SECRET_NAME: snowflakeSecretName,
       },
-    });
+    }));
     this.orchestratorArn = orchestrator.runtimeArn;
+
+    // Publish discovery parameters to SSM
+    new Discovery(this, 'Discovery', {
+      environment: props.environment,
+      parameters: {
+        'orchestrator-arn': orchestrator.runtimeArn,
+        'sql-arn': sql.runtimeArn,
+        'analyst-arn': analyst.runtimeArn,
+        'writer-arn': writer.runtimeArn,
+        'validator-arn': validator.runtimeArn,
+        'memory-id': memory.memoryId,
+      },
+    });
   }
 }

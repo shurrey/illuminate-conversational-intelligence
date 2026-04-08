@@ -3,7 +3,8 @@ import * as cdk from 'aws-cdk-lib';
 import { BaseStack } from '../lib/base';
 import { AgentCoreStack } from '../lib/agentcore';
 import { ApiStack } from '../lib/api';
-import { FrontendStack } from '../lib/frontend';
+// Frontend is deployed separately (its own project/stack)
+// import { FrontendStack } from '../lib/frontend';
 
 const app = new cdk.App();
 
@@ -58,14 +59,7 @@ const api = new ApiStack(app, `IlluminateApi-${environment}`, {
 });
 api.addDependency(agentcore);
 
-// =============================================================================
-// Stack 4: Frontend (S3 + CloudFront + WAF)
-// =============================================================================
-const frontend = new FrontendStack(app, `IlluminateFrontend-${environment}`, {
-  env,
-  environment,
-  functionUrlDomain: api.functionUrlDomain,
-});
-frontend.addDependency(api);
+// Frontend is deployed separately — keep code in lib/frontend/ for reference.
+// To include it: uncomment FrontendStack import above and instantiate here.
 
 app.synth();

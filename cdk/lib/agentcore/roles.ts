@@ -83,14 +83,21 @@ export class AgentRole extends Construct {
       ],
     }));
 
-    // ECR access for container images
+    // ECR access for container images (CDK bootstrap repo + any agentcore repos)
+    this.role.addToPolicy(new iam.PolicyStatement({
+      actions: ['ecr:GetAuthorizationToken'],
+      resources: ['*'],
+    }));
     this.role.addToPolicy(new iam.PolicyStatement({
       actions: [
-        'ecr:GetAuthorizationToken',
         'ecr:BatchGetImage',
         'ecr:GetDownloadUrlForLayer',
+        'ecr:BatchCheckLayerAvailability',
       ],
-      resources: ['*'],
+      resources: [
+        `arn:aws:ecr:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:repository/cdk-*`,
+        `arn:aws:ecr:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:repository/bedrock-agentcore-*`,
+      ],
     }));
   }
 }

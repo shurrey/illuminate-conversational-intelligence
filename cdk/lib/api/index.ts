@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { LambdaProxy } from './lambda-proxy';
+import { Discovery } from '../base/discovery';
 
 export interface ApiStackProps extends cdk.StackProps {
   environment: string;
@@ -39,5 +40,13 @@ export class ApiStack extends cdk.Stack {
     this.functionUrl = proxy.functionUrl;
     this.functionUrlDomain = proxy.functionUrlDomain;
     this.lambdaFunction = proxy.fn;
+
+    // Publish discovery parameters to SSM
+    new Discovery(this, 'Discovery', {
+      environment: props.environment,
+      parameters: {
+        'api-url': proxy.functionUrl.url,
+      },
+    });
   }
 }
