@@ -1,9 +1,11 @@
 # Illuminate API Reference
 
-The Illuminate API is served by a Lambda proxy (`lambda_handler.py`) built with FastAPI. All traffic is routed through CloudFront:
+The Illuminate API is served by a Lambda proxy (`lambda_handler.py`) built with FastAPI and running via Lambda Web Adapter (LWA) for real SSE streaming. All traffic is routed through CloudFront:
 
 - `/*` routes to S3 (frontend static assets)
 - `/api/*` and `/health` route to the Lambda Function URL
+
+Streaming responses are delivered as real-time Server-Sent Events via the Function URL's `RESPONSE_STREAM` invoke mode (not buffered).
 
 ## Authentication
 
@@ -50,7 +52,23 @@ Non-streaming chat request. Sends a message to the orchestrator agent and return
 | Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
 | Content-Type    | `application/json`           | Yes      |
 
-**Request Body** (A2A JSON-RPC format)
+**Request Body (Simplified Format)**
+
+```json
+{
+  "message": "What is the average GPA for Fall 2024?",
+  "context_id": "<uuid>"
+}
+```
+
+| Field        | Type   | Description                                                         |
+| ------------ | ------ | ------------------------------------------------------------------- |
+| `message`    | string | The user's question or instruction.                                 |
+| `context_id` | string | UUID for the conversation context. Reuse across messages in the same conversation. |
+
+**Request Body (A2A JSON-RPC Format)**
+
+The endpoint also accepts the full A2A JSON-RPC 2.0 format:
 
 ```json
 {
@@ -97,7 +115,7 @@ Non-streaming chat request. Sends a message to the orchestrator agent and return
 | Field        | Type        | Description                                             |
 | ------------ | ----------- | ------------------------------------------------------- |
 | `text`       | string      | The agent's text response.                              |
-| `artifacts`  | array       | List of artifact objects (charts, tables). May be empty. |
+| `artifacts`  | array       | List of artifact objects (charts, tables, SQL). May be empty. |
 | `context_id` | string      | The conversation context ID for follow-up messages.     |
 | `sources`    | array\|null | Source references, if any.                              |
 
@@ -105,7 +123,9 @@ Non-streaming chat request. Sends a message to the orchestrator agent and return
 
 ### POST /api/chat/stream
 
-Streaming chat request via **Server-Sent Events (SSE)**. This is the primary endpoint used by the frontend. It sends a message to the orchestrator and streams back status updates and the final response.
+Streaming chat request via **Server-Sent Events (SSE)**. This is the primary endpoint used by the frontend. It sends a message to the orchestrator and streams back real-time status updates and the final response.
+
+Streaming is real-time (not buffered) thanks to Lambda Web Adapter running uvicorn inside Lambda with `RESPONSE_STREAM` invoke mode.
 
 **Headers**
 
@@ -117,7 +137,7 @@ Streaming chat request via **Server-Sent Events (SSE)**. This is the primary end
 
 **Request Body**
 
-Same format as `POST /api/chat` (see above).
+Same format as `POST /api/chat` (either simplified or A2A JSON-RPC format).
 
 **Response** `200 OK` (`text/event-stream`)
 
@@ -129,12 +149,12 @@ data: <json_payload>\n\n
 
 #### Event types
 
-**Status event** -- Progress updates while agents are working.
+**Status event** -- Real-time progress updates as the orchestrator invokes each specialist agent. These are generated from `[TOOL_STATUS:agent_name]` markers detected in the streaming response.
 
 ```json
 {
   "type": "status",
-  "message": "Querying agents..."
+  "message": "Querying database..."
 }
 ```
 
@@ -191,7 +211,7 @@ Cancel an in-progress chat request.
 
 ### GET /api/conversations/{context_id}
 
-Retrieve the message history for a conversation. Conversation state is managed by AgentCore memory.
+Retrieve the message history for a conversation. Conversation state is managed by AgentCore Short-Term Memory (STM).
 
 **Path Parameters**
 
@@ -247,7 +267,7 @@ Clear all messages in a conversation.
 
 ## Artifacts
 
-Agents may return **artifacts** alongside text responses. Artifacts represent structured data such as charts or tables that the frontend renders as interactive visualizations.
+Agents may return **artifacts** alongside text responses. Artifacts represent structured data such as charts, tables, or SQL queries that the frontend renders as interactive visualizations or modals.
 
 ### Chart artifact
 
@@ -274,7 +294,7 @@ Agents may return **artifacts** alongside text responses. Artifacts represent st
 | Field              | Type   | Description                                                        |
 | ------------------ | ------ | ------------------------------------------------------------------ |
 | `id`               | string | Unique identifier for the artifact.                                |
-| `type`             | string | Artifact type. Currently `"chart"`.                                |
+| `type`             | string | `"chart"` for chart artifacts.                                     |
 | `title`            | string | Display title for the artifact.                                    |
 | `data.chart_type`  | string | One of `bar`, `line`, `pie`, `scatter`, `histogram`.               |
 | `data.title`       | string | Chart title (may duplicate the top-level `title`).                 |
@@ -283,3 +303,33 @@ Agents may return **artifacts** alongside text responses. Artifacts represent st
 | `data.x_label`     | string | Human-readable label for the x-axis.                              |
 | `data.y_label`     | string | Human-readable label for the y-axis.                              |
 | `data.data`        | array  | Array of data point objects. Keys correspond to `x_axis`/`y_axis`. |
+
+### SQL artifact
+
+```json
+{
+  "id": "<uuid>",
+  "type": "sql",
+  "title": "SQL Query",
+  "data": {
+    "query": "SELECT department, COUNT(*) as enrollment\nFROM DATABASE.CDM_LMS.ENROLLMENTS\nGROUP BY department\nORDER BY enrollment DESC"
+  }
+}
+```
+
+| Field        | Type   | Description                                                 |
+| ------------ | ------ | ----------------------------------------------------------- |
+| `id`         | string | Unique identifier for the artifact.                         |
+| `type`       | string | `"sql"` for SQL query artifacts.                            |
+| `title`      | string | Display title (typically "SQL Query").                       |
+| `data.query` | string | The raw SQL query that was executed against Snowflake.       |
+
+The frontend renders SQL artifacts as a "View SQL" badge inline with the message text. Clicking the badge opens a modal (`SqlModal`) that displays the SQL formatted with `sql-formatter`, includes a copy-to-clipboard button, and provides prev/next navigation when multiple SQL queries are present in a single response.
+
+### Other artifact types
+
+| Type    | Description |
+|---------|-------------|
+| `table` | Tabular data rendered as an HTML table |
+| `text`  | Plain text artifact |
+| `error` | Error details |

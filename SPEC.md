@@ -1,3 +1,25 @@
+> **Note:** This is the **original PRD** written before implementation began. The actual
+> implementation has diverged significantly from this specification in several ways:
+>
+> - **Agents implemented:** SQL, Analyst, Writer, Validator (not Learning, Student,
+>   Telemetry, Visualization, or Collaboration as originally planned). A single SQL agent
+>   handles all schemas rather than domain-specific agents per CDM schema.
+> - **No Snowflake MCP server:** The SQL agent connects directly to Snowflake via
+>   `snowflake-connector-python` rather than through an MCP server layer.
+> - **No Cortex Analyst:** The LLM generates SQL directly from schema introspection
+>   rather than using Snowflake Cortex Analyst with semantic models.
+> - **Auth:** Amazon Cognito JWT authentication (not stub auth or institutional SSO).
+> - **No assistant-ui:** Custom React components (ChatContainer, MessageBubble, etc.)
+>   instead of the assistant-ui library.
+> - **Infrastructure:** AWS CDK (TypeScript, 3 stacks) replaced the planned CloudFormation
+>   approach. Agents run as Docker containers on AgentCore, not zip-based runtimes.
+> - **Lambda proxy:** Uses Lambda Web Adapter (LWA) for real SSE streaming instead of Mangum.
+> - **Models:** All agents currently use Claude Sonnet 4.6 via cross-region inference profiles.
+>
+> The spec below is preserved as a historical reference for the original vision and requirements.
+
+---
+
 # Product Requirements Document: Illuminate Conversational Intelligence Platform
 
 ## Executive Summary
@@ -6,7 +28,7 @@ This PRD defines a multi-agent conversational analytics system that enables natu
 
 **Product Name:** Illuminate Conversational Intelligence (ICI)
 
-**Vision:** Enable institutional stakeholders—from analysts to administrators—to explore complex educational data through natural language conversations, removing the barrier between users and insights.
+**Vision:** Enable institutional stakeholders---from analysts to administrators---to explore complex educational data through natural language conversations, removing the barrier between users and insights.
 
 ---
 
@@ -47,47 +69,47 @@ A multi-agent conversational platform where specialized AI agents collaborate to
 The system follows a **Supervisor-Specialist pattern** using Google's A2A protocol for agent communication:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Frontend (React Chat UI)                     │
-└─────────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Orchestrator Agent (Supervisor)               │
-│  • Routes queries to appropriate specialist agents               │
-│  • Maintains conversation context via AgentCore Memory           │
-│  • Aggregates responses for user presentation                    │
-│  • Handles clarification requests                                │
-└─────────────────────────────────────────────────────────────────┘
-           │              │              │              │
-     A2A   │        A2A   │        A2A   │        A2A   │
-           ▼              ▼              ▼              ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  Learning    │  │   Student    │  │  Telemetry   │  │ Visualization│
-│    Agent     │  │    Agent     │  │    Agent     │  │    Agent     │
-│              │  │              │  │              │  │              │
-│ CDM_LMS data │  │ CDM_SIS data │  │ CDM_TLM data │  │ Chart/Graph  │
-│ Courses      │  │ Enrollments  │  │ User activity│  │ generation   │
-│ Grades       │  │ Demographics │  │ Engagement   │  │ Summaries    │
-│ Assignments  │  │ Programs     │  │ Sessions     │  │              │
-└──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘
-           │              │              │
-           └──────────────┴──────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Snowflake MCP Server Layer                    │
-│  • Cortex Analyst for semantic SQL generation                   │
-│  • Schema introspection tools                                    │
-│  • Query execution with RBAC enforcement                         │
-│  • Result formatting and pagination                              │
-└─────────────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│               Anthology Illuminate Snowflake Warehouse           │
-│  CDM_LMS │ CDM_SIS │ CDM_CLB │ CDM_TLM │ CDM_MEDIA │ LEARN      │
-└─────────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------+
+|                     Frontend (React Chat UI)                     |
++-------------------------------------------------------------+
+                                |
+                                v
++-------------------------------------------------------------+
+|                    Orchestrator Agent (Supervisor)               |
+|  - Routes queries to appropriate specialist agents               |
+|  - Maintains conversation context via AgentCore Memory           |
+|  - Aggregates responses for user presentation                    |
+|  - Handles clarification requests                                |
++-------------------------------------------------------------+
+           |              |              |              |
+     A2A   |        A2A   |        A2A   |        A2A   |
+           v              v              v              v
++--------------+  +--------------+  +--------------+  +--------------+
+|  Learning    |  |   Student    |  |  Telemetry   |  | Visualization|
+|    Agent     |  |    Agent     |  |    Agent     |  |    Agent     |
+|              |  |              |  |              |  |              |
+| CDM_LMS data |  | CDM_SIS data |  | CDM_TLM data |  | Chart/Graph  |
+| Courses      |  | Enrollments  |  | User activity|  | generation   |
+| Grades       |  | Demographics |  | Engagement   |  | Summaries    |
+| Assignments  |  | Programs     |  | Sessions     |  |              |
++--------------+  +--------------+  +--------------+  +--------------+
+           |              |              |
+           +------------------------------+
+                          |
+                          v
++-------------------------------------------------------------+
+|                    Snowflake MCP Server Layer                    |
+|  - Cortex Analyst for semantic SQL generation                   |
+|  - Schema introspection tools                                    |
+|  - Query execution with RBAC enforcement                         |
+|  - Result formatting and pagination                              |
++-------------------------------------------------------------+
+                          |
+                          v
++-------------------------------------------------------------+
+|               Anthology Illuminate Snowflake Warehouse           |
+|  CDM_LMS | CDM_SIS | CDM_CLB | CDM_TLM | CDM_MEDIA | LEARN      |
++-------------------------------------------------------------+
 ```
 
 ### 2.2 Agent Specifications
@@ -137,7 +159,7 @@ The system follows a **Supervisor-Specialist pattern** using Google's A2A protoc
 
 #### 2.2.2 Learning Agent (CDM_LMS Specialist)
 
-**Role:** Expert on Blackboard Learn data—courses, enrollments, grades, assignments
+**Role:** Expert on Blackboard Learn data---courses, enrollments, grades, assignments
 
 **Agent Card:**
 ```json
@@ -174,7 +196,7 @@ The system follows a **Supervisor-Specialist pattern** using Google's A2A protoc
 
 #### 2.2.3 Student Agent (CDM_SIS Specialist)
 
-**Role:** Expert on student information—demographics, programs, academic records
+**Role:** Expert on student information---demographics, programs, academic records
 
 **Agent Card:**
 ```json
@@ -211,7 +233,7 @@ The system follows a **Supervisor-Specialist pattern** using Google's A2A protoc
 
 #### 2.2.4 Telemetry Agent (CDM_TLM Specialist)
 
-**Role:** Expert on user behavior—engagement, activity patterns, session data
+**Role:** Expert on user behavior---engagement, activity patterns, session data
 
 **Agent Card:**
 ```json
@@ -279,13 +301,13 @@ The system follows a **Supervisor-Specialist pattern** using Google's A2A protoc
 
 **Query Lifecycle:**
 
-1. **User Input** → Frontend sends message to Orchestrator
-2. **Intent Classification** → Orchestrator analyzes query, determines required agents
-3. **Task Delegation** (A2A) → Orchestrator sends JSON-RPC `message/send` to specialists
-4. **MCP Execution** → Specialists invoke Snowflake MCP tools
-5. **Result Aggregation** → Specialists return artifacts to Orchestrator
-6. **Visualization** (optional) → Orchestrator delegates to Visualization Agent
-7. **Response Delivery** → Formatted response streamed to frontend
+1. **User Input** -> Frontend sends message to Orchestrator
+2. **Intent Classification** -> Orchestrator analyzes query, determines required agents
+3. **Task Delegation** (A2A) -> Orchestrator sends JSON-RPC `message/send` to specialists
+4. **MCP Execution** -> Specialists invoke Snowflake MCP tools
+5. **Result Aggregation** -> Specialists return artifacts to Orchestrator
+6. **Visualization** (optional) -> Orchestrator delegates to Visualization Agent
+7. **Response Delivery** -> Formatted response streamed to frontend
 
 **Example A2A Task Delegation:**
 ```json
@@ -525,13 +547,13 @@ Following Anthology's UEF patterns and accessibility standards:
 ### 4.2 Key Entity Relationships
 
 ```
-CDM_LMS.PERSON_COURSE ─────┬───── CDM_LMS.COURSE
-         │                 │
-         │                 └───── CDM_LMS.GRADE
-         │
-         └───── CDM_SIS.STUDENT ─────── CDM_SIS.PROGRAM
-                     │
-                     └───── CDM_TLM.ACTIVITY
+CDM_LMS.PERSON_COURSE -----+------- CDM_LMS.COURSE
+         |                 |
+         |                 +------- CDM_LMS.GRADE
+         |
+         +------- CDM_SIS.STUDENT ------- CDM_SIS.PROGRAM
+                     |
+                     +------- CDM_TLM.ACTIVITY
 ```
 
 ---
@@ -542,12 +564,12 @@ CDM_LMS.PERSON_COURSE ─────┬───── CDM_LMS.COURSE
 
 **Phase 1-3 (Stub Authentication):**
 ```
-User → API Key / Basic Auth → Backend Validation → Session Token
+User -> API Key / Basic Auth -> Backend Validation -> Session Token
 ```
 
 **Phase 4+ (SSO Integration Ready):**
 ```
-User → Institutional IdP (SAML/OIDC) → AgentCore Identity → Session Token
+User -> Institutional IdP (SAML/OIDC) -> AgentCore Identity -> Session Token
 ```
 
 ### 5.2 Authorization Model

@@ -9,7 +9,8 @@ A multi-agent AI system that lets institutional researchers, academic advisors, 
 - **Ask questions naturally**: "What's the average GPA for Fall 2024?" or "Show me enrollment trends by department"
 - **Get real answers**: Queries are translated to SQL, executed against Snowflake, and results are analyzed
 - **Visualize data**: Request charts and the system generates interactive Plotly visualizations
-- **Follow up**: Conversation context is maintained across turns
+- **View the SQL**: Every query is surfaced as a navigable SQL artifact so you can see exactly what ran
+- **Follow up**: Conversation context is maintained across turns via AgentCore Short-Term Memory (STM)
 - **FERPA compliant**: A dedicated validator agent checks every response for PII exposure
 
 ## Architecture
@@ -25,18 +26,18 @@ CloudFront (static files) + Lambda Function URL (API)
   v
 Bedrock AgentCore (A2A Protocol)
   |
-  +-- Orchestrator (Claude Sonnet) -- coordinates the pipeline
+  +-- Orchestrator (Claude Sonnet 4.6) -- coordinates the pipeline
   |     |
-  |     +-- SQL Agent (Claude Opus) -- generates & executes Snowflake queries
-  |     +-- Analyst Agent (Claude Opus) -- interprets query results
-  |     +-- Writer Agent (Claude Sonnet) -- crafts human-readable responses
-  |     +-- Validator Agent (Claude Sonnet) -- FERPA/PII compliance check
+  |     +-- SQL Agent (Claude Sonnet 4.6) -- generates & executes Snowflake queries
+  |     +-- Analyst Agent (Claude Sonnet 4.6) -- interprets query results
+  |     +-- Writer Agent (Claude Sonnet 4.6) -- crafts human-readable responses
+  |     +-- Validator Agent (Claude Sonnet 4.6) -- FERPA/PII compliance check
   |
   v
 Snowflake Data Warehouse
 ```
 
-All agents run as self-contained runtimes on AWS Bedrock AgentCore, communicating via the A2A (Agent-to-Agent) protocol. The Lambda function is a thin proxy that forwards requests to the orchestrator.
+All agents run as containerized runtimes on AWS Bedrock AgentCore, communicating via the A2A (Agent-to-Agent) protocol. The Lambda function is a thin proxy that forwards requests to the orchestrator using Lambda Web Adapter (LWA) for real SSE streaming.
 
 ## Tech Stack
 
@@ -44,31 +45,33 @@ All agents run as self-contained runtimes on AWS Bedrock AgentCore, communicatin
 |-------|-----------|
 | Frontend | React 18, TypeScript, Vite, TailwindCSS |
 | Charts | Plotly.js via react-plotly.js |
+| SQL Display | sql-formatter |
 | Auth | Amazon Cognito (JWT) |
-| API Proxy | AWS Lambda (Python 3.11, FastAPI, Mangum) |
-| Agent Runtime | AWS Bedrock AgentCore |
+| API Proxy | AWS Lambda (Python 3.13, FastAPI, Lambda Web Adapter) |
+| Agent Runtime | AWS Bedrock AgentCore (Docker containers, ARM64) |
 | Agent Framework | Strands Agents SDK (A2A protocol) |
-| LLM | Claude Sonnet 4 / Claude Opus 4 (via Amazon Bedrock) |
+| LLM | Claude Sonnet 4.6 (via Amazon Bedrock cross-region inference) |
 | Data Warehouse | Snowflake |
-| Infrastructure | CloudFormation (4 stacks), CloudFront, S3, WAF |
+| Infrastructure | AWS CDK (TypeScript, 3 stacks) |
 
 ## Quick Start
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full deployment instructions.
 
 ```bash
-# Prerequisites: AWS CLI configured, Python 3.11+, Node.js 18+, agentcore CLI
+# Prerequisites: AWS CLI configured, Python 3.11+, Node.js 18+, Docker, AWS CDK CLI
 
-# 1. Deploy AWS infrastructure
-cd infrastructure/scripts
-./deploy.sh dev
+# 1. Configure environment
+cp .env.example .env
+# Edit .env with your Snowflake credentials and settings
 
-# 2. Deploy agents to Bedrock AgentCore
-cd ../
-./agentcore-deploy.sh
+# 2. Deploy all infrastructure (Base + AgentCore + API)
+cd cdk
+npm install
+npx cdk deploy --all
 
-# 3. Deploy frontend
-cd scripts/
+# 3. Deploy frontend (currently deployed separately)
+cd ../infrastructure/scripts
 ./deploy-frontend.sh dev
 ```
 
@@ -84,28 +87,41 @@ cd scripts/
 
 ```
 illuminate-ici/
-├── agents/                    # Agent source code (deployed to AgentCore)
-│   ├── orchestrator/          #   Central coordinator
-│   ├── sql/                   #   SQL generation & Snowflake execution
-│   ├── analyst/               #   Data analysis & interpretation
-│   ├── writer/                #   Response composition
-│   └── validator/             #   FERPA compliance validation
-├── frontend/                  # React frontend
-│   ├── src/
-│   │   ├── components/        #   Chat, layout, visualization components
-│   │   ├── services/          #   API client, auth service
-│   │   ├── hooks/             #   Custom React hooks (useChat)
-│   │   └── types/             #   TypeScript type definitions
-│   ├── .env.development       #   Dev environment config
-│   └── .env.production        #   Production environment config
-├── infrastructure/            # AWS deployment
-│   ├── cloudformation/        #   4 CloudFormation YAML stacks
-│   ├── scripts/               #   Deployment shell scripts
-│   └── agentcore-deploy.sh    #   Agent deployment to AgentCore
-├── lambda_handler.py          # Lambda proxy (FastAPI + Mangum)
+├── agents/                    # 5 self-contained A2A agents
+│   ├── Dockerfile             # Shared Dockerfile (uv + Python 3.13, ARM64)
+│   ├── orchestrator/          # Central coordinator
+│   │   ├── a2a_server.py
+│   │   ├── requirements.txt
+│   │   └── Dockerfile -> ../Dockerfile
+│   ├── sql/                   # SQL generation & Snowflake execution
+│   ├── analyst/               # Data analysis & interpretation
+│   ├── writer/                # Response composition
+│   └── validator/             # FERPA compliance validation
+├── cdk/                       # AWS CDK infrastructure (TypeScript)
+│   ├── bin/illuminate.ts      # App entry point -- 3 stacks, reads .env
+│   ├── lib/
+│   │   ├── base/              # VPC, Cognito, S3, Secrets, WAF, SSM
+│   │   ├── agentcore/         # IAM, Memory (STM), 5x container runtimes
+│   │   ├── api/               # Lambda + LWA + Function URL (RESPONSE_STREAM)
+│   │   └── frontend/          # S3 + CloudFront (deployed separately)
+│   └── package.json
+├── infrastructure/            # Legacy CloudFormation + shell scripts
+│   ├── cloudformation/        # 4 YAML stacks (superseded by CDK)
+│   └── scripts/               # Deploy/teardown scripts
+├── frontend/                  # React SPA
+│   └── src/
+│       ├── components/
+│       │   ├── chat/           # MessageBubble, InputArea, etc.
+│       │   └── visualization/  # ChartRenderer, DataTable, SqlModal
+│       ├── hooks/useChat.ts
+│       ├── services/           # agentClient, authService
+│       └── types/              # message.ts, visualization.ts
+├── lambda_handler.py          # FastAPI proxy (runs via LWA, NOT Mangum)
+├── run.sh                     # LWA startup script (uvicorn)
 ├── requirements-lambda.txt    # Lambda Python dependencies
-├── docs/                      # Documentation
-└── SPEC.md                    # Product requirements document
+├── .env                       # Local config (gitignored)
+├── .env.example
+└── docs/
 ```
 
 ## Example Queries

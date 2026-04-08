@@ -19,7 +19,7 @@
   - [Visualization Pipeline](#visualization-pipeline)
 - [Lambda Proxy](#lambda-proxy)
 - [Infrastructure](#infrastructure)
-  - [CloudFormation Stacks](#cloudformation-stacks)
+  - [CDK Stacks](#cdk-stacks)
   - [Request Flow](#request-flow)
 - [Important Patterns and Gotchas](#important-patterns-and-gotchas)
 - [Troubleshooting](#troubleshooting)
@@ -32,23 +32,23 @@ Illuminate is a multi-agent conversational intelligence system that lets users q
 Snowflake data using natural language. The system is composed of:
 
 1. **Frontend** - React SPA served from S3 via CloudFront
-2. **Lambda Proxy** - Thin FastAPI/Mangum handler that validates Cognito JWTs and
-   forwards requests to the orchestrator
+2. **Lambda Proxy** - Thin FastAPI handler running via Lambda Web Adapter (LWA) that
+   validates Cognito JWTs and forwards requests to the orchestrator with real SSE streaming
 3. **Orchestrator Agent** - Coordinates specialist agents to fulfill user queries
 4. **Specialist Agents** - SQL, Analyst, Writer, and Validator, each running as
-   independent Bedrock AgentCore runtimes using the A2A (Agent-to-Agent) protocol
+   independent Bedrock AgentCore container runtimes using the A2A (Agent-to-Agent) protocol
 
-All agent code runs in AWS Bedrock AgentCore. There is no local development server
-for the backend -- both dev and prod environments are AWS-hosted.
+All agent code runs in AWS Bedrock AgentCore as Docker containers (ARM64). There is no
+local development server for the backend -- both dev and prod environments are AWS-hosted.
 
 ```
 User -> CloudFront -> S3 (static files)
-User -> CloudFront -> Lambda Function URL -> Lambda Proxy -> Orchestrator AgentCore
-                                                                  |
-                                                 +----------------+----------------+
-                                                 |        |       |                |
-                                               SQL    Analyst   Writer         Validator
-                                            (AgentCore runtimes, A2A protocol)
+User -> CloudFront -> Lambda Function URL -> Lambda Proxy (LWA) -> Orchestrator AgentCore
+                                                                        |
+                                                       +----------------+----------------+
+                                                       |        |       |                |
+                                                     SQL    Analyst   Writer         Validator
+                                                  (AgentCore container runtimes, A2A protocol)
 ```
 
 ## Project Structure
@@ -56,26 +56,38 @@ User -> CloudFront -> Lambda Function URL -> Lambda Proxy -> Orchestrator AgentC
 ```
 /
 ├── agents/
-│   ├── orchestrator/        # Coordinates specialist agents
+│   ├── Dockerfile              # Shared Dockerfile (uv + Python 3.13, ARM64)
+│   ├── orchestrator/           # Coordinates specialist agents
 │   │   ├── a2a_server.py
 │   │   ├── requirements.txt
-│   │   └── .bedrock_agentcore.yaml
-│   ├── sql/                 # Generates and executes Snowflake SQL
+│   │   └── Dockerfile -> ../Dockerfile
+│   ├── sql/                    # Generates and executes Snowflake SQL
 │   │   ├── a2a_server.py
 │   │   ├── requirements.txt
-│   │   └── .bedrock_agentcore.yaml
-│   ├── analyst/             # Data analysis and interpretation
+│   │   └── Dockerfile -> ../Dockerfile
+│   ├── analyst/                # Data analysis and interpretation
 │   │   ├── a2a_server.py
 │   │   ├── requirements.txt
-│   │   └── .bedrock_agentcore.yaml
-│   ├── writer/              # Narrative report generation
+│   │   └── Dockerfile -> ../Dockerfile
+│   ├── writer/                 # Narrative report generation
 │   │   ├── a2a_server.py
 │   │   ├── requirements.txt
-│   │   └── .bedrock_agentcore.yaml
-│   └── validator/           # Result validation and quality checks
+│   │   └── Dockerfile -> ../Dockerfile
+│   └── validator/              # Result validation and quality checks
 │       ├── a2a_server.py
 │       ├── requirements.txt
-│       └── .bedrock_agentcore.yaml
+│       └── Dockerfile -> ../Dockerfile
+├── cdk/                        # AWS CDK infrastructure (TypeScript)
+│   ├── bin/illuminate.ts       # App entry point -- 3 stacks, reads .env
+│   ├── lib/
+│   │   ├── base/               # VPC, Cognito, S3, Secrets, WAF, SSM
+│   │   ├── agentcore/          # IAM, Memory (STM), 5x container runtimes
+│   │   ├── api/                # Lambda + LWA + Function URL
+│   │   └── frontend/           # S3 + CloudFront (deployed separately)
+│   └── package.json
+├── infrastructure/             # Legacy CloudFormation + shell scripts
+│   ├── cloudformation/         # 4 CF templates (superseded by CDK)
+│   └── scripts/                # Deployment helper scripts
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx
@@ -83,7 +95,7 @@ User -> CloudFront -> Lambda Function URL -> Lambda Proxy -> Orchestrator AgentC
 │   │   │   ├── auth/            # Login, auth guards
 │   │   │   ├── chat/            # ChatContainer, MessageBubble, InputArea, etc.
 │   │   │   ├── layout/          # AppShell, Header, Sidebar
-│   │   │   └── visualization/   # ChartRenderer, DataTable, ExportButton
+│   │   │   └── visualization/   # ChartRenderer, DataTable, ExportButton, SqlModal
 │   │   ├── hooks/
 │   │   │   └── useChat.ts       # Main chat state management
 │   │   ├── services/
@@ -94,10 +106,9 @@ User -> CloudFront -> Lambda Function URL -> Lambda Proxy -> Orchestrator AgentC
 │   │       └── visualization.ts # Chart config types, chartConfigToPlotly()
 │   ├── package.json
 │   └── tsconfig.json
-├── infrastructure/
-│   ├── cloudformation/          # CF templates (4-stack architecture)
-│   └── scripts/                 # Deployment helper scripts
-├── lambda_handler.py            # API proxy Lambda (FastAPI + Mangum)
+├── lambda_handler.py            # API proxy Lambda (FastAPI + LWA)
+├── run.sh                       # LWA startup script (uvicorn on port 8080)
+├── requirements-lambda.txt      # Lambda Python dependencies
 └── docs/
     └── DEVELOPMENT.md           # This file
 ```
@@ -108,18 +119,19 @@ User -> CloudFront -> Lambda Function URL -> Lambda Proxy -> Orchestrator AgentC
 
 - Python 3.11+
 - Node.js 20+
-- AWS CLI configured with credentials for account 442606396405
-- Bedrock AgentCore CLI (`agentcore`) installed
+- Docker (for building agent container images)
+- AWS CLI configured with credentials for account 856599266077
+- AWS CDK CLI (`npm install -g aws-cdk`)
 - Access to the `illuminate-agent-role-dev` IAM role
 
 ### Python Environment
 
 ```bash
 # From the project root
-source venv/bin/activate
+source .venv/bin/activate
 ```
 
-The project uses a `venv` directory (not `.venv`).
+The project uses a `.venv` directory.
 
 ### Frontend Environment
 
@@ -136,7 +148,7 @@ npx vite build --mode development
 ```
 
 There is no local dev server that connects to live backends. The `VITE_API_URL`
-environment variable must point to the deployed CloudFront URL for all API calls.
+environment variable must point to the deployed Function URL for all API calls.
 
 ## Agent Development
 
@@ -144,11 +156,11 @@ environment variable must point to the deployed CloudFront URL for all API calls
 
 Each agent is a self-contained Python application that:
 
-1. Creates a **FastAPI** app
-2. Instantiates a **Strands Agent** with `@tool`-decorated functions as capabilities
-3. Mounts an **A2AServer** (from `strands-agents[a2a]`) onto the FastAPI app
-4. Listens on **port 9000** (AgentCore convention)
-5. Is deployed to **Bedrock AgentCore** as an A2A protocol runtime
+1. Defines `@tool`-decorated functions as capabilities
+2. Creates a **Strands Agent** with a system prompt and tools
+3. Builds an ASGI app via `build_a2a_app(agent)` from `strands_a2a.a2a`
+4. Listens on **port 8080** (LWA / container convention)
+5. Is deployed to **Bedrock AgentCore** as a Docker container runtime
 
 The orchestrator agent is special: it uses `@tool`-decorated functions that
 internally call other agents via `boto3.client("bedrock-agent-runtime").invoke_agent_runtime()`.
@@ -163,19 +175,13 @@ AWS SDK calls, not direct network connections.
    vim agents/sql/a2a_server.py
    ```
 
-2. Deploy the updated agent:
+2. Deploy the updated agent via CDK:
    ```bash
-   cd agents/sql
-   agentcore deploy
+   cd cdk
+   npx cdk deploy IlluminateAgentCore-dev
    ```
 
-3. Test the deployed agent:
-   ```bash
-   agentcore invoke --runtime-id <runtime-id>
-   ```
-
-   The runtime ID can be found in `.bedrock_agentcore.yaml` under
-   `bedrock_agentcore.agent_id`.
+   CDK will detect which Docker images changed and only rebuild those.
 
 ### Adding a New Agent
 
@@ -184,31 +190,30 @@ AWS SDK calls, not direct network connections.
    mkdir agents/myagent
    ```
 
-2. Write `agents/myagent/a2a_server.py` following this pattern:
+2. Create a Dockerfile symlink:
+   ```bash
+   cd agents/myagent
+   ln -s ../Dockerfile Dockerfile
+   ```
+
+3. Write `agents/myagent/a2a_server.py` following this pattern:
 
    ```python
    """
    MyAgent - Self-contained A2A server for AgentCore deployment.
    Zero `from agents.*` imports.
    """
-   import json
    import os
    import sys
-   from fastapi import FastAPI, Request
-   from fastapi.responses import JSONResponse
-
-   startup_log = []
-   startup_error = None
 
    def log(msg):
-       startup_log.append(msg)
        print(msg, file=sys.stderr, flush=True)
 
    try:
        log("Initializing MyAgent ...")
        from strands import Agent, tool
        from strands.models.bedrock import BedrockModel
-       from strands_a2a import A2AServer
+       from strands_a2a.a2a import build_a2a_app
 
        @tool
        def my_capability(input_text: str) -> str:
@@ -217,7 +222,7 @@ AWS SDK calls, not direct network connections.
            return "result"
 
        model = BedrockModel(
-           model_id=os.environ.get("MODEL_ID", "anthropic.claude-sonnet-4-6"),
+           model_id=os.environ.get("MODEL_ID", "us.anthropic.claude-sonnet-4-6"),
            region_name=os.environ.get("AWS_REGION", "us-east-1"),
        )
 
@@ -227,27 +232,26 @@ AWS SDK calls, not direct network connections.
            system_prompt="You are a specialist agent that ...",
        )
 
-       a2a_server = A2AServer(agent=agent)
-       app = FastAPI(title="MyAgent")
-       a2a_server.mount(app)
+       app = build_a2a_app(agent)
        log("MyAgent initialized successfully")
 
    except Exception as e:
-       startup_error = str(e)
        log(f"STARTUP ERROR: {e}")
-       app = FastAPI(title="MyAgent-Error")
+       from starlette.applications import Starlette
+       from starlette.responses import JSONResponse
+       from starlette.routing import Route
 
-   @app.get("/health")
-   async def health():
-       return {"status": "ok" if not startup_error else "error",
-               "startup_log": startup_log}
+       async def error_health(request):
+           return JSONResponse({"status": "error", "error": str(e)})
+
+       app = Starlette(routes=[Route("/health", error_health)])
 
    if __name__ == "__main__":
        import uvicorn
-       uvicorn.run(app, host="0.0.0.0", port=9000)
+       uvicorn.run(app, host="0.0.0.0", port=8080)
    ```
 
-3. Write `agents/myagent/requirements.txt`:
+4. Write `agents/myagent/requirements.txt`:
    ```
    strands-agents[a2a]
    strands-agents-tools
@@ -258,22 +262,16 @@ AWS SDK calls, not direct network connections.
    boto3>=1.34.0
    ```
 
-4. Create `.bedrock_agentcore.yaml` using `agentcore init` or by copying and
-   modifying an existing one. Key fields to set:
-   - `name`: Unique agent name (e.g., `illuminate_myagent_dev`)
-   - `entrypoint`: Absolute path to `a2a_server.py`
-   - `source_path`: Absolute path to the agent directory
-   - `runtime_type`: `PYTHON_3_11`
-   - `protocol_configuration.server_protocol`: `A2A`
-   - `aws.execution_role`: `arn:aws:iam::442606396405:role/illuminate-agent-role-dev`
+5. Add the agent to the CDK AgentCore stack in `cdk/lib/agentcore/`. This
+   involves adding a new `DockerImageAsset` and `CfnRuntime` resource.
 
-5. Deploy:
+6. Deploy:
    ```bash
-   cd agents/myagent
-   agentcore deploy
+   cd cdk
+   npx cdk deploy IlluminateAgentCore-dev
    ```
 
-6. Register the new agent in the orchestrator by adding a tool function to
+7. Register the new agent in the orchestrator by adding a tool function to
    `agents/orchestrator/a2a_server.py`:
 
    ```python
@@ -288,7 +286,7 @@ AWS SDK calls, not direct network connections.
    ```
 
    Add the new tool to the orchestrator's `tools` list and add the runtime ARN
-   to the orchestrator's `.env.agentcore` file.
+   as an environment variable in the CDK AgentCore stack.
 
 ### Critical Constraint: Self-Contained Code
 
@@ -299,9 +297,8 @@ imports.** This means:
 - No `from agents.sql import ...`
 - No relative imports referencing other agent directories
 
-This is required because `agentcore deploy` flattens all source files into a zip
-at the root level. Any import path like `agents.shared.utils` will not exist in
-the deployed container.
+Each agent is built into its own Docker container. There is no shared
+filesystem between agents.
 
 If you need shared utility code, copy it directly into each agent's
 `a2a_server.py` file.
@@ -338,8 +335,8 @@ response = client.invoke_agent_runtime(
 )
 ```
 
-Agent runtime ARNs are configured via environment variables loaded from
-`.env.agentcore` files at startup.
+Agent runtime ARNs are configured via environment variables set in the CDK
+AgentCore stack and passed to each container runtime.
 
 ## Frontend Development
 
@@ -349,6 +346,7 @@ Agent runtime ARNs are configured via environment variables loaded from
 - **Vite** for build tooling
 - **TailwindCSS** for styling
 - **Plotly.js** (via react-plotly.js) for chart rendering
+- **sql-formatter** for SQL display in SqlModal
 - **react-markdown** with remark-gfm for markdown rendering
 - **amazon-cognito-identity-js** for Cognito authentication
 
@@ -357,7 +355,7 @@ Agent runtime ARNs are configured via environment variables loaded from
 | File | Purpose |
 |------|---------|
 | `src/App.tsx` | Root component, routing, auth state |
-| `src/services/agentClient.ts` | API client; sends A2A messages, handles SSE streams |
+| `src/services/agentClient.ts` | API client; sends messages, handles SSE streams |
 | `src/services/authService.ts` | Cognito sign-in/sign-up/token management |
 | `src/hooks/useChat.ts` | Chat state management (messages, loading, errors) |
 | `src/components/chat/ChatContainer.tsx` | Main chat view, wires together message list and input |
@@ -369,6 +367,7 @@ Agent runtime ARNs are configured via environment variables loaded from
 | `src/components/visualization/ChartRenderer.tsx` | Renders Plotly charts from ChartConfig |
 | `src/components/visualization/DataTable.tsx` | Renders tabular data |
 | `src/components/visualization/ExportButton.tsx` | Export data as CSV/image |
+| `src/components/visualization/SqlModal.tsx` | Modal showing formatted SQL with copy + navigation |
 | `src/types/message.ts` | TypeScript types: Message, Artifact, StreamingEvent, etc. |
 | `src/types/visualization.ts` | ChartConfig types, `chartConfigToPlotly()` converter |
 
@@ -382,32 +381,32 @@ npx vite build --mode development
 
 The build output goes to `frontend/dist/` and is deployed to S3. The single
 environment variable `VITE_API_URL` controls where API calls are sent (the
-CloudFront distribution URL).
+Lambda Function URL).
 
 ### Chat and Streaming
 
 The frontend communicates with the backend via the `AgentClient` class in
 `src/services/agentClient.ts`. It supports two modes:
 
-1. **Standard request/response** via `sendMessage()` -- sends a JSON-RPC 2.0
-   message and receives a complete `AgentResponse`
+1. **Standard request/response** via `sendMessage()` -- sends a message and
+   receives a complete response
 2. **SSE streaming** via `sendMessageStreaming()` -- sends the same request but
    reads the response as a `ReadableStream`, parsing server-sent events for
    real-time updates
 
 Streaming events include:
-- `status` -- General status update
-- `routing` -- Agent routing decision (which specialist to use)
-- `thinking` -- Chain-of-thought content from the agent
-- `tool_call` / `tool_result` -- Tool invocation details
+- `status` -- Progress updates (which agent is currently working, via `[TOOL_STATUS]` markers)
 - `text` -- Incremental text output
-- `complete` -- Final response with full data
+- `complete` -- Final response with full data and artifacts
 - `error` -- Error information
 
-Note: The Lambda proxy runs in BUFFERED mode (Python Lambda does not support
-`RESPONSE_STREAM`), so SSE events arrive in batches rather than truly real-time.
+Streaming is **real-time** thanks to Lambda Web Adapter (LWA) running uvicorn
+inside Lambda with `RESPONSE_STREAM` invoke mode. SSE events arrive
+individually as they are generated, not batched.
 
 ### Visualization Pipeline
+
+#### Charts
 
 Charts flow through the system using text markers rather than tool calls:
 
@@ -422,18 +421,37 @@ Charts flow through the system using text markers rather than tool calls:
 The `ChartConfig` interface supports these chart types: `bar`, `line`, `pie`,
 `scatter`, `heatmap`, and `histogram`.
 
+#### SQL Artifacts
+
+SQL queries are surfaced to the user for transparency:
+
+1. The SQL agent wraps every executed query in `[SQL_QUERY]...[/SQL_QUERY]` markers
+2. The Lambda proxy extracts these markers and creates `Artifact` objects with `type: "sql"`
+3. The frontend renders SQL artifacts as a "View SQL" badge inline with the message
+4. Clicking the badge opens `SqlModal.tsx`, which formats the SQL using `sql-formatter`
+   and provides a copy-to-clipboard button and prev/next navigation for multiple queries
+
 ## Lambda Proxy
 
-The Lambda proxy (`lambda_handler.py`) is a thin FastAPI application wrapped with
-Mangum for Lambda compatibility. It:
+The Lambda proxy (`lambda_handler.py`) is a FastAPI application running via
+**Lambda Web Adapter (LWA)** for real SSE streaming. It:
 
 1. Accepts requests from the CloudFront distribution (via Lambda Function URL)
 2. Validates Cognito JWT tokens from the `Authorization` header
 3. Forwards the user message to the orchestrator agent via
-   `boto3.client("bedrock-agent-runtime").invoke_agent_runtime()`
-4. Extracts `[CHART_CONFIG]` markers from the response text and converts them
-   to frontend-compatible artifact objects
-5. Returns the response as JSON (or SSE for streaming endpoints)
+   `boto3.client("bedrock-agent-runtime").invoke_agent_runtime()` with
+   `RESPONSE_STREAM` for real-time streaming
+4. Detects `[TOOL_STATUS:name]` markers in the stream and sends them as status SSE events
+5. Extracts `[CHART_CONFIG]` markers from the response text and converts them
+   to frontend-compatible chart artifact objects
+6. Extracts `[SQL_QUERY]` markers from the response text and converts them
+   to SQL artifact objects
+7. Returns the response as real-time SSE (streaming) or JSON (non-streaming)
+
+LWA works by:
+- `run.sh` starts uvicorn on port 8080
+- LWA's `/opt/bootstrap` proxies Lambda invocations to the uvicorn process
+- The Function URL is configured with `InvokeMode: RESPONSE_STREAM`
 
 The Lambda Function URL uses `AuthType: NONE` (auth is handled at the application
 level via Cognito JWTs). This requires two Lambda permissions:
@@ -442,16 +460,25 @@ level via Cognito JWTs). This requires two Lambda permissions:
 
 ## Infrastructure
 
-### CloudFormation Stacks
+### CDK Stacks
 
-The infrastructure is organized into four CloudFormation stacks, deployed in order:
+The infrastructure is managed by AWS CDK (TypeScript) organized into three stacks:
 
-| Stack | Template | Purpose |
-|-------|----------|---------|
-| 1 | `1-base-infrastructure.yaml` | VPC, Cognito user pool, REGIONAL WAF, Secrets Manager, S3 buckets |
-| 2 | `2-agentcore.yaml` | AgentCore Gateway, Memory, agent runtime definitions |
-| 3 | `3-api-gateway.yaml` | Lambda proxy function + Function URL (API Gateway has been removed) |
-| 4 | `4-frontend.yaml` | S3 bucket (OAC), CloudFront distribution (API origin + GLOBAL WAF + SPA routing) |
+| Stack | Directory | Purpose |
+|-------|-----------|---------|
+| `IlluminateBase-dev` | `cdk/lib/base/` | VPC, Cognito (LITE), S3, Secrets Manager, REGIONAL WAF, SSM parameters |
+| `IlluminateAgentCore-dev` | `cdk/lib/agentcore/` | IAM role, Memory (STM), 5x Docker container runtimes (ECR) |
+| `IlluminateAPI-dev` | `cdk/lib/api/` | Lambda + LWA + Function URL (`RESPONSE_STREAM`) |
+
+A fourth stack (`cdk/lib/frontend/`) exists for S3 + CloudFront but is
+currently deployed separately.
+
+Deploy all stacks:
+```bash
+cd cdk && npx cdk deploy --all
+```
+
+The CDK app reads `.env` automatically -- no context flags needed.
 
 ### Request Flow
 
@@ -461,15 +488,16 @@ Browser
   v
 CloudFront Distribution
   |-- /* (default) ---------> S3 Bucket (frontend static files, via OAC)
-  |-- /api/* ----------------> Lambda Function URL ---> Lambda Proxy
+  |-- /api/* ----------------> Lambda Function URL ---> Lambda Proxy (LWA)
   |-- /health --------------->                          |
                                                         v
                                               Orchestrator AgentCore
+                                              (Docker container)
                                                         |
                                          +---------+----+----+---------+
                                          |         |         |         |
                                         SQL    Analyst    Writer   Validator
-                                     (AgentCore runtimes, A2A protocol)
+                                     (AgentCore container runtimes, A2A)
                                          |
                                          v
                                       Snowflake
@@ -477,47 +505,47 @@ CloudFront Distribution
 
 ### Key AWS Resources
 
-- **Account**: 442606396405
+- **Account**: 856599266077
 - **Region**: us-east-1
 - **IAM Role**: `illuminate-agent-role-dev`
-- **S3 (build sources)**: `bedrock-agentcore-codebuild-sources-442606396405-us-east-1`
-- **Cognito User Pool**: `illuminate-users-dev` (ID: `us-east-1_ZWs8MEKzt`)
+- **Cognito User Pool**: `illuminate-users-dev`
 - **Secrets Manager**: `illuminate/dev/snowflake` (Snowflake credentials)
 
 ## Important Patterns and Gotchas
 
 ### Agent Code Must Be Self-Contained
 
-As described above, `agentcore deploy` flattens all files to the zip root. No
+As described above, each agent is built into its own Docker container. No
 cross-directory imports will work. Copy any shared code directly into each
 agent's `a2a_server.py`.
 
-### Chart Markers Instead of Tool Calls
+### Chart and SQL Markers Instead of Tool Calls
 
-Visualization data passes through the system as text markers
-(`[CHART_CONFIG]...[/CHART_CONFIG]`) rather than structured tool call results.
-The Lambda proxy is responsible for extracting and parsing these into artifacts.
+Visualization data and SQL queries pass through the system as text markers
+(`[CHART_CONFIG]...[/CHART_CONFIG]` and `[SQL_QUERY]...[/SQL_QUERY]`) rather
+than structured tool call results. The Lambda proxy is responsible for
+extracting and parsing these into artifacts.
 
 ### No Local Development Server
 
 There is no local backend. Both development and production use AWS-hosted
 infrastructure. The frontend build is deployed to S3 and served via CloudFront.
 To test changes:
-- **Agent changes**: Deploy with `agentcore deploy` and test with `agentcore invoke`
+- **Agent changes**: Deploy with `npx cdk deploy IlluminateAgentCore-dev`
 - **Frontend changes**: Build and upload to S3
-- **Lambda changes**: Package and deploy the Lambda function
+- **Lambda changes**: Deploy with `npx cdk deploy IlluminateAPI-dev`
 
-### Lambda Buffered Mode
+### Docker Required for Agent Deployment
 
-Python Lambda does not support `RESPONSE_STREAM` invoke mode. The Lambda proxy
-uses `BUFFERED` mode, which means SSE events are accumulated and sent as a batch
-rather than streamed in real-time. The frontend handles this gracefully.
+CDK builds ARM64 Docker images locally via `DockerImageAsset`. Docker must be
+running before deploying the AgentCore stack. On Apple Silicon Macs, ARM64
+builds work natively. On x86 machines, QEMU emulation is required.
 
 ### AgentCore Error Codes
 
 Common error codes when deploying or invoking agents:
 - **424**: Container never starts (check dependencies, entry point)
-- **502**: Application not responding (check port binding, health endpoint)
+- **502**: Application not responding (check port binding to 8080, health endpoint)
 - **"init time exceeded"**: Slow initialization (reduce import time, defer heavy imports)
 
 ### Cognito Authentication
@@ -529,23 +557,23 @@ header.
 
 ### Environment Variables
 
-Agent environment variables (including other agents' runtime ARNs) are stored in
-`.env.agentcore` files in each agent directory. These are loaded at startup by
-each `a2a_server.py`.
+Agent environment variables (including other agents' runtime ARNs) are set in
+the CDK AgentCore stack and passed as environment variables to each container
+runtime.
 
 The frontend uses a single environment variable: `VITE_API_URL`, which is set at
-build time and points to the CloudFront distribution URL.
+build time and points to the Lambda Function URL.
 
 ## Troubleshooting
 
 ### Agent deployment fails
 
 ```bash
-# Check the deployment logs
-agentcore deploy --verbose
+# Check CDK diff to see what changed
+cd cdk && npx cdk diff IlluminateAgentCore-dev
 
-# Verify the .bedrock_agentcore.yaml is valid
-cat agents/<name>/.bedrock_agentcore.yaml
+# Check CloudWatch logs for the agent
+aws logs tail /aws/bedrock-agentcore/illuminate_<agent>_dev --follow
 ```
 
 ### Agent returns 424 on invoke
@@ -553,13 +581,13 @@ cat agents/<name>/.bedrock_agentcore.yaml
 The container failed to start. Common causes:
 - Missing dependency in `requirements.txt`
 - Import error in `a2a_server.py` (check for cross-agent imports)
-- Invalid entry point path in `.bedrock_agentcore.yaml`
+- Dockerfile issue (check the shared `agents/Dockerfile`)
 
 ### Agent returns 502 on invoke
 
 The container started but the app is not responding. Common causes:
-- App not binding to port 9000
-- Crash after startup (check the `/health` endpoint output for `startup_error`)
+- App not binding to port 8080
+- Crash after startup (check CloudWatch logs)
 - Missing environment variables
 
 ### Frontend API calls fail
@@ -575,3 +603,9 @@ The container started but the app is not responding. Common causes:
   markers
 - Verify the JSON inside the markers is valid and matches the `ChartConfig` type
 - Check the browser console for Plotly rendering errors
+
+### SQL artifacts not appearing
+
+- Check that the SQL agent response contains `[SQL_QUERY]...[/SQL_QUERY]` markers
+- Verify the Lambda proxy's regex is extracting them correctly
+- Check the browser console for rendering errors in `SqlModal`
