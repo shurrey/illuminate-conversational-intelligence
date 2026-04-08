@@ -18,6 +18,9 @@ export interface BaseStackProps extends cdk.StackProps {
   snowflakeDatabase: string;
   snowflakeWarehouse: string;
   snowflakeRole: string;
+  initialUserEmail?: string;
+  initialUserPassword?: string;
+  initialUserName?: string;
 }
 
 export class BaseStack extends cdk.Stack {
@@ -42,6 +45,9 @@ export class BaseStack extends cdk.Stack {
 
     const auth = new Auth(this, 'Auth', {
       environment: props.environment,
+      initialUserEmail: props.initialUserEmail,
+      initialUserPassword: props.initialUserPassword,
+      initialUserName: props.initialUserName,
     });
     this.userPool = auth.userPool;
     this.userPoolClient = auth.userPoolClient;
