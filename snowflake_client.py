@@ -78,3 +78,30 @@ def query_preview(schema: str, table: str, limit: int = 20) -> dict:
         return {"columns": columns, "rows": rows}
     finally:
         cursor.close()
+
+
+def query_sql(sql: str) -> dict:
+    """Execute a read-only SQL statement and return columns + rows.
+
+    Only SELECT and WITH statements are allowed.
+
+    Returns:
+        {"columns": ["COL1", ...], "rows": [{"COL1": val, ...}, ...]}
+
+    Raises:
+        ValueError: If the SQL is not a SELECT/WITH statement.
+        Exception: On Snowflake execution errors (caller should catch).
+    """
+    normalized = sql.strip().upper()
+    if not (normalized.startswith("SELECT") or normalized.startswith("WITH")):
+        raise ValueError("Only SELECT and WITH queries are allowed")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(sql)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return {"columns": columns, "rows": rows}
+    finally:
+        cursor.close()

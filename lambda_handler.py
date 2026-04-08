@@ -886,6 +886,47 @@ async def dictionary_preview(
 
 
 # =============================================================================
+# Dashboard Query Endpoint
+# =============================================================================
+
+class DashboardQueryRequest(BaseModel):
+    """Request body for dashboard SQL queries."""
+    sql: str
+
+
+@app.post("/api/v1/dashboard/query")
+async def dashboard_query(
+    request: DashboardQueryRequest,
+    authorization: str = Header(...),
+):
+    """Execute a read-only SQL query against Snowflake for dashboard widgets.
+
+    Only SELECT/WITH statements are allowed. Returns columns + rows on success,
+    or an error message on failure.
+    """
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    if not request.sql.strip():
+        return {"error": "Empty SQL query"}
+
+    try:
+        import asyncio
+        from snowflake_client import query_sql
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: query_sql(request.sql))
+        logger.info(f"Dashboard query returned {len(result['rows'])} rows")
+        return result
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Dashboard query failed: {e}")
+        return {"error": str(e)}
+
+
+# =============================================================================
 # Lambda Web Adapter entry point
 # =============================================================================
 # When run as __main__ (via run.sh), start uvicorn.  LWA handles proxying
