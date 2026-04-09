@@ -1,5 +1,5 @@
 {
-  "name": "illuminate-cdk",
+  "name": "illuminate-poc-backend-cdk",
   "version": "1.0.0",
   "private": true,
   "scripts": {
@@ -10,8 +10,7 @@
     "deploy": "cdk deploy --all",
     "deploy:base": "cdk deploy IlluminateBase-*",
     "deploy:agentcore": "cdk deploy IlluminateAgentCore-*",
-    "deploy:api": "cdk deploy IlluminateApi-*",
-    "deploy:frontend": "cdk deploy IlluminateFrontend-*"
+    "deploy:api": "cdk deploy IlluminateApi-*"
   },
   "dependencies": {
     "@aws-cdk/aws-bedrock-agentcore-alpha": "^2.248.0-alpha.0",

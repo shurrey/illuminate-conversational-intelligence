@@ -1,4 +1,4 @@
-# Illuminate Conversational Intelligence - Developer Guide
+# Illuminate POC Backend - Developer Guide
 
 ## Table of Contents
 
@@ -11,12 +11,6 @@
   - [Adding a New Agent](#adding-a-new-agent)
   - [Critical Constraint: Self-Contained Code](#critical-constraint-self-contained-code)
   - [Agent Communication Pattern](#agent-communication-pattern)
-- [Frontend Development](#frontend-development)
-  - [Tech Stack](#tech-stack)
-  - [Key Source Files](#key-source-files)
-  - [Building the Frontend](#building-the-frontend)
-  - [Chat and Streaming](#chat-and-streaming)
-  - [Visualization Pipeline](#visualization-pipeline)
 - [Lambda Proxy](#lambda-proxy)
 - [Infrastructure](#infrastructure)
   - [CDK Stacks](#cdk-stacks)
@@ -28,27 +22,25 @@
 
 ## Architecture Overview
 
-Illuminate is a multi-agent conversational intelligence system that lets users query
+Illuminate POC Backend is a multi-agent conversational intelligence system that lets users query
 Snowflake data using natural language. The system is composed of:
 
-1. **Frontend** - React SPA served from S3 via CloudFront
-2. **Lambda Proxy** - Thin FastAPI handler running via Lambda Web Adapter (LWA) that
+1. **Lambda Proxy** - Thin FastAPI handler running via Lambda Web Adapter (LWA) that
    validates Cognito JWTs and forwards requests to the orchestrator with real SSE streaming
-3. **Orchestrator Agent** - Coordinates specialist agents to fulfill user queries
-4. **Specialist Agents** - SQL, Analyst, Writer, and Validator, each running as
+2. **Orchestrator Agent** - Coordinates specialist agents to fulfill user queries
+3. **Specialist Agents** - SQL, Analyst, Writer, and Validator, each running as
    independent Bedrock AgentCore container runtimes using the A2A (Agent-to-Agent) protocol
 
 All agent code runs in AWS Bedrock AgentCore as Docker containers (ARM64). There is no
 local development server for the backend -- both dev and prod environments are AWS-hosted.
 
 ```
-User -> CloudFront -> S3 (static files)
-User -> CloudFront -> Lambda Function URL -> Lambda Proxy (LWA) -> Orchestrator AgentCore
-                                                                        |
-                                                       +----------------+----------------+
-                                                       |        |       |                |
-                                                     SQL    Analyst   Writer         Validator
-                                                  (AgentCore container runtimes, A2A protocol)
+API Client -> Lambda Function URL -> Lambda Proxy (LWA) -> Orchestrator AgentCore
+                                                                |
+                                                +---------------+----------------+
+                                                |        |       |               |
+                                              SQL    Analyst   Writer        Validator
+                                           (AgentCore container runtimes, A2A protocol)
 ```
 
 ## Project Structure
@@ -82,30 +74,8 @@ User -> CloudFront -> Lambda Function URL -> Lambda Proxy (LWA) -> Orchestrator 
 │   ├── lib/
 │   │   ├── base/               # VPC, Cognito, S3, Secrets, WAF, SSM
 │   │   ├── agentcore/          # IAM, Memory (STM), 5x container runtimes
-│   │   ├── api/                # Lambda + LWA + Function URL
-│   │   └── frontend/           # S3 + CloudFront (deployed separately)
+│   │   └── api/                # Lambda + LWA + Function URL
 │   └── package.json
-├── infrastructure/             # Legacy CloudFormation + shell scripts
-│   ├── cloudformation/         # 4 CF templates (superseded by CDK)
-│   └── scripts/                # Deployment helper scripts
-├── frontend/
-│   ├── src/
-│   │   ├── App.tsx
-│   │   ├── components/
-│   │   │   ├── auth/            # Login, auth guards
-│   │   │   ├── chat/            # ChatContainer, MessageBubble, InputArea, etc.
-│   │   │   ├── layout/          # AppShell, Header, Sidebar
-│   │   │   └── visualization/   # ChartRenderer, DataTable, ExportButton, SqlModal
-│   │   ├── hooks/
-│   │   │   └── useChat.ts       # Main chat state management
-│   │   ├── services/
-│   │   │   ├── agentClient.ts   # API client (fetch + ReadableStream for SSE)
-│   │   │   └── authService.ts   # Cognito auth via amazon-cognito-identity-js
-│   │   └── types/
-│   │       ├── message.ts       # Message, Artifact, StreamingEvent types
-│   │       └── visualization.ts # Chart config types, chartConfigToPlotly()
-│   ├── package.json
-│   └── tsconfig.json
 ├── lambda_handler.py            # API proxy Lambda (FastAPI + LWA)
 ├── run.sh                       # LWA startup script (uvicorn on port 8080)
 ├── requirements-lambda.txt      # Lambda Python dependencies
@@ -133,23 +103,6 @@ source .venv/bin/activate
 
 The project uses a `.venv` directory.
 
-### Frontend Environment
-
-```bash
-cd frontend
-npm install
-```
-
-### Building the Frontend
-
-```bash
-cd frontend
-npx vite build --mode development
-```
-
-There is no local dev server that connects to live backends. The `VITE_API_URL`
-environment variable must point to the deployed Function URL for all API calls.
-
 ## Agent Development
 
 ### How Agents Work
@@ -159,7 +112,7 @@ Each agent is a self-contained Python application that:
 1. Defines `@tool`-decorated functions as capabilities
 2. Creates a **Strands Agent** with a system prompt and tools
 3. Builds an ASGI app via `build_a2a_app(agent)` from `strands_a2a.a2a`
-4. Listens on **port 8080** (LWA / container convention)
+4. Listens on **port 8080** (container convention)
 5. Is deployed to **Bedrock AgentCore** as a Docker container runtime
 
 The orchestrator agent is special: it uses `@tool`-decorated functions that
@@ -338,112 +291,19 @@ response = client.invoke_agent_runtime(
 Agent runtime ARNs are configured via environment variables set in the CDK
 AgentCore stack and passed to each container runtime.
 
-## Frontend Development
-
-### Tech Stack
-
-- **React 18** with TypeScript
-- **Vite** for build tooling
-- **TailwindCSS** for styling
-- **Plotly.js** (via react-plotly.js) for chart rendering
-- **sql-formatter** for SQL display in SqlModal
-- **react-markdown** with remark-gfm for markdown rendering
-- **amazon-cognito-identity-js** for Cognito authentication
-
-### Key Source Files
-
-| File | Purpose |
-|------|---------|
-| `src/App.tsx` | Root component, routing, auth state |
-| `src/services/agentClient.ts` | API client; sends messages, handles SSE streams |
-| `src/services/authService.ts` | Cognito sign-in/sign-up/token management |
-| `src/hooks/useChat.ts` | Chat state management (messages, loading, errors) |
-| `src/components/chat/ChatContainer.tsx` | Main chat view, wires together message list and input |
-| `src/components/chat/MessageBubble.tsx` | Renders individual messages with markdown and artifacts |
-| `src/components/chat/InputArea.tsx` | User input with send button |
-| `src/components/chat/MessageList.tsx` | Scrollable message list |
-| `src/components/chat/ThinkingBubble.tsx` | Shows agent chain-of-thought steps |
-| `src/components/chat/TypingIndicator.tsx` | Typing animation during agent processing |
-| `src/components/visualization/ChartRenderer.tsx` | Renders Plotly charts from ChartConfig |
-| `src/components/visualization/DataTable.tsx` | Renders tabular data |
-| `src/components/visualization/ExportButton.tsx` | Export data as CSV/image |
-| `src/components/visualization/SqlModal.tsx` | Modal showing formatted SQL with copy + navigation |
-| `src/types/message.ts` | TypeScript types: Message, Artifact, StreamingEvent, etc. |
-| `src/types/visualization.ts` | ChartConfig types, `chartConfigToPlotly()` converter |
-
-### Building the Frontend
-
-```bash
-cd frontend
-npm install
-npx vite build --mode development
-```
-
-The build output goes to `frontend/dist/` and is deployed to S3. The single
-environment variable `VITE_API_URL` controls where API calls are sent (the
-Lambda Function URL).
-
-### Chat and Streaming
-
-The frontend communicates with the backend via the `AgentClient` class in
-`src/services/agentClient.ts`. It supports two modes:
-
-1. **Standard request/response** via `sendMessage()` -- sends a message and
-   receives a complete response
-2. **SSE streaming** via `sendMessageStreaming()` -- sends the same request but
-   reads the response as a `ReadableStream`, parsing server-sent events for
-   real-time updates
-
-Streaming events include:
-- `status` -- Progress updates (which agent is currently working, via `[TOOL_STATUS]` markers)
-- `text` -- Incremental text output
-- `complete` -- Final response with full data and artifacts
-- `error` -- Error information
-
-Streaming is **real-time** thanks to Lambda Web Adapter (LWA) running uvicorn
-inside Lambda with `RESPONSE_STREAM` invoke mode. SSE events arrive
-individually as they are generated, not batched.
-
-### Visualization Pipeline
-
-#### Charts
-
-Charts flow through the system using text markers rather than tool calls:
-
-1. The analyst agent generates chart specifications as JSON
-2. The JSON is wrapped in `[CHART_CONFIG]{...}[/CHART_CONFIG]` text markers
-3. The Lambda proxy extracts these markers using a regex, parses the JSON, and
-   converts them into `Artifact` objects in the API response
-4. The frontend receives artifacts with `type: "chart"` and renders them using
-   `ChartRenderer.tsx`, which calls `chartConfigToPlotly()` to convert the
-   internal `ChartConfig` format to Plotly trace/layout objects
-
-The `ChartConfig` interface supports these chart types: `bar`, `line`, `pie`,
-`scatter`, `heatmap`, and `histogram`.
-
-#### SQL Artifacts
-
-SQL queries are surfaced to the user for transparency:
-
-1. The SQL agent wraps every executed query in `[SQL_QUERY]...[/SQL_QUERY]` markers
-2. The Lambda proxy extracts these markers and creates `Artifact` objects with `type: "sql"`
-3. The frontend renders SQL artifacts as a "View SQL" badge inline with the message
-4. Clicking the badge opens `SqlModal.tsx`, which formats the SQL using `sql-formatter`
-   and provides a copy-to-clipboard button and prev/next navigation for multiple queries
-
 ## Lambda Proxy
 
 The Lambda proxy (`lambda_handler.py`) is a FastAPI application running via
 **Lambda Web Adapter (LWA)** for real SSE streaming. It:
 
-1. Accepts requests from the CloudFront distribution (via Lambda Function URL)
+1. Accepts requests at the Lambda Function URL
 2. Validates Cognito JWT tokens from the `Authorization` header
 3. Forwards the user message to the orchestrator agent via
    `boto3.client("bedrock-agent-runtime").invoke_agent_runtime()` with
    `RESPONSE_STREAM` for real-time streaming
 4. Detects `[TOOL_STATUS:name]` markers in the stream and sends them as status SSE events
 5. Extracts `[CHART_CONFIG]` markers from the response text and converts them
-   to frontend-compatible chart artifact objects
+   to chart artifact objects
 6. Extracts `[SQL_QUERY]` markers from the response text and converts them
    to SQL artifact objects
 7. Returns the response as real-time SSE (streaming) or JSON (non-streaming)
@@ -470,9 +330,6 @@ The infrastructure is managed by AWS CDK (TypeScript) organized into three stack
 | `IlluminateAgentCore-dev` | `cdk/lib/agentcore/` | IAM role, Memory (STM), 5x Docker container runtimes (ECR) |
 | `IlluminateAPI-dev` | `cdk/lib/api/` | Lambda + LWA + Function URL (`RESPONSE_STREAM`) |
 
-A fourth stack (`cdk/lib/frontend/`) exists for S3 + CloudFront but is
-currently deployed separately.
-
 Deploy all stacks:
 ```bash
 cd cdk && npx cdk deploy --all
@@ -483,24 +340,22 @@ The CDK app reads `.env` automatically -- no context flags needed.
 ### Request Flow
 
 ```
-Browser
+API Client
   |
   v
-CloudFront Distribution
-  |-- /* (default) ---------> S3 Bucket (frontend static files, via OAC)
-  |-- /api/* ----------------> Lambda Function URL ---> Lambda Proxy (LWA)
-  |-- /health --------------->                          |
-                                                        v
-                                              Orchestrator AgentCore
-                                              (Docker container)
-                                                        |
-                                         +---------+----+----+---------+
-                                         |         |         |         |
-                                        SQL    Analyst    Writer   Validator
-                                     (AgentCore container runtimes, A2A)
-                                         |
-                                         v
-                                      Snowflake
+Lambda Function URL ---> Lambda Proxy (LWA)
+                          |
+                          v
+                Orchestrator AgentCore
+                (Docker container)
+                          |
+           +---------+----+----+---------+
+           |         |         |         |
+          SQL    Analyst    Writer   Validator
+       (AgentCore container runtimes, A2A)
+           |
+           v
+        Snowflake
 ```
 
 ### Key AWS Resources
@@ -529,10 +384,8 @@ extracting and parsing these into artifacts.
 ### No Local Development Server
 
 There is no local backend. Both development and production use AWS-hosted
-infrastructure. The frontend build is deployed to S3 and served via CloudFront.
-To test changes:
+infrastructure. To test changes:
 - **Agent changes**: Deploy with `npx cdk deploy IlluminateAgentCore-dev`
-- **Frontend changes**: Build and upload to S3
 - **Lambda changes**: Deploy with `npx cdk deploy IlluminateAPI-dev`
 
 ### Docker Required for Agent Deployment
@@ -550,19 +403,15 @@ Common error codes when deploying or invoking agents:
 
 ### Cognito Authentication
 
-The frontend uses `amazon-cognito-identity-js` directly (not Amplify). The
-`authService.ts` handles sign-in, sign-up, token refresh, and session management.
-JWT tokens are attached to API requests via the `Authorization: Bearer <token>`
-header.
+API clients authenticate via Amazon Cognito. JWT tokens are attached to API
+requests via the `Authorization: Bearer <token>` header. The Lambda validates
+the token on every request using the Cognito JWKS endpoint.
 
 ### Environment Variables
 
 Agent environment variables (including other agents' runtime ARNs) are set in
 the CDK AgentCore stack and passed as environment variables to each container
 runtime.
-
-The frontend uses a single environment variable: `VITE_API_URL`, which is set at
-build time and points to the Lambda Function URL.
 
 ## Troubleshooting
 
@@ -590,22 +439,22 @@ The container started but the app is not responding. Common causes:
 - Crash after startup (check CloudWatch logs)
 - Missing environment variables
 
-### Frontend API calls fail
+### API calls fail
 
-- Verify `VITE_API_URL` is set correctly in the build
+- Verify the Lambda Function URL is accessible (check SSM parameter `/illuminate/dev/api-url`)
 - Check that the Cognito token is valid and not expired
 - Verify the Lambda Function URL permissions (both `InvokeFunctionUrl` and
   `InvokeFunction` with `InvokedViaFunctionUrl: true` are required)
 
-### Charts not rendering
+### Charts not rendering in API response
 
 - Check that the agent response contains valid `[CHART_CONFIG]...[/CHART_CONFIG]`
   markers
-- Verify the JSON inside the markers is valid and matches the `ChartConfig` type
-- Check the browser console for Plotly rendering errors
+- Verify the JSON inside the markers is valid and matches the `ChartConfig` schema
+- Check Lambda logs for extraction errors
 
-### SQL artifacts not appearing
+### SQL artifacts not appearing in API response
 
 - Check that the SQL agent response contains `[SQL_QUERY]...[/SQL_QUERY]` markers
 - Verify the Lambda proxy's regex is extracting them correctly
-- Check the browser console for rendering errors in `SqlModal`
+- Check Lambda logs for parsing errors

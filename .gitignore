@@ -23,11 +23,8 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# Node/Frontend
+# Node (CDK)
 node_modules/
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
 *.log
 npm-debug.log*
 
@@ -38,20 +35,16 @@ npm-debug.log*
 *.swo
 .DS_Store
 
-# Infrastructure
-infrastructure/cdk.out/
-infrastructure/node_modules/
-infrastructure/bin/*.js
-infrastructure/bin/*.d.ts
-infrastructure/lib/*.js
-infrastructure/lib/*.d.ts
-
 # Build artifacts
 *.zip
 
 # AgentCore build artifacts
 agents/*/.bedrock_agentcore/
 agents/*/.env.agentcore
+
+# CDK
+cdk/cdk.out/
+cdk/dist/
 
 # Temporary
 tmp/

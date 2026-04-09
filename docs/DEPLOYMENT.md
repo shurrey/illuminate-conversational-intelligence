@@ -1,6 +1,6 @@
-# Illuminate Conversational Intelligence - Deployment Guide
+# Illuminate POC Backend - Deployment Guide
 
-This document describes how to deploy the Illuminate ICI platform from scratch
+This document describes how to deploy the Illuminate POC Backend from scratch
 and how to update individual components after the initial deployment.
 
 ---
@@ -9,12 +9,10 @@ and how to update individual components after the initial deployment.
 
 1. [Prerequisites](#1-prerequisites)
 2. [Initial Setup (Environment Configuration)](#2-initial-setup-environment-configuration)
-3. [CDK Deployment (Primary)](#3-cdk-deployment-primary)
-4. [Frontend Deployment](#4-frontend-deployment)
-5. [Verification](#5-verification)
-6. [Updating Individual Components](#6-updating-individual-components)
-7. [Legacy CloudFormation Deployment](#7-legacy-cloudformation-deployment)
-8. [Troubleshooting](#8-troubleshooting)
+3. [CDK Deployment](#3-cdk-deployment)
+4. [Verification](#4-verification)
+5. [Updating Individual Components](#5-updating-individual-components)
+6. [Troubleshooting](#6-troubleshooting)
 
 ---
 
@@ -26,8 +24,8 @@ and how to update individual components after the initial deployment.
 |------|---------|---------|
 | AWS CLI v2 | Latest | AWS operations and credential management |
 | Python | 3.11+ | Lambda handler, virtual environment |
-| Node.js | 18+ | CDK CLI, frontend build (React + Vite) |
-| npm | Bundled with Node.js | CDK and frontend dependency management |
+| Node.js | 18+ | CDK CLI |
+| npm | Bundled with Node.js | CDK dependency management |
 | Docker | Latest | Building agent container images (ARM64) |
 | AWS CDK CLI | Latest | Infrastructure deployment (`npm install -g aws-cdk`) |
 
@@ -40,10 +38,9 @@ The deploying IAM principal needs permissions for:
 - S3 (create buckets, upload objects)
 - ECR (create repositories, push images)
 - Lambda (create/update functions)
-- CloudFront (create distributions, invalidate cache)
 - Cognito (create user pools)
 - Secrets Manager (create/read secrets)
-- WAF v2 (create web ACLs -- both REGIONAL and CLOUDFRONT scopes)
+- WAF v2 (create web ACLs -- REGIONAL scope)
 - SSM Parameter Store (put/get parameters)
 - Bedrock (model access)
 - Bedrock AgentCore (create/invoke runtimes, manage memory)
@@ -123,7 +120,7 @@ pip install python-dotenv
 
 ---
 
-## 3. CDK Deployment (Primary)
+## 3. CDK Deployment
 
 Infrastructure is managed via **AWS CDK** (TypeScript) organized into three
 stacks. CDK reads configuration from `.env` automatically -- no `-c` context
@@ -174,53 +171,7 @@ npx cdk deploy IlluminateAPI-dev
 
 ---
 
-## 4. Frontend Deployment
-
-The frontend is a React 18 + TypeScript application built with Vite and styled
-with TailwindCSS. It authenticates users via Cognito
-(`amazon-cognito-identity-js`).
-
-The CDK stack for the frontend exists in `cdk/lib/frontend/` but is currently
-deployed separately using the legacy script.
-
-### Deploy Command
-
-```bash
-infrastructure/scripts/deploy-frontend.sh dev
-```
-
-The script:
-
-1. Reads backend configuration from SSM / CloudFormation stack outputs:
-   - Function URL from the API stack
-   - Cognito User Pool ID and Client ID from the base stack
-2. Deploys `4-frontend.yaml` (S3 bucket + CloudFront + GLOBAL WAF)
-3. Writes `.env.production.local` with the `VITE_` variables:
-   ```
-   VITE_API_URL=<function-url>
-   VITE_USER_POOL_ID=<pool-id>
-   VITE_USER_POOL_CLIENT_ID=<client-id>
-   ```
-4. Runs `npm install` and `npm run build` in the `frontend/` directory
-5. Syncs `frontend/dist/` to the S3 bucket
-6. Invalidates the CloudFront cache (`/*`)
-7. Cleans up `.env.production.local`
-
-### CloudFront Routing
-
-CloudFront is configured with two origins:
-
-| Path Pattern | Origin | Purpose |
-|-------------|--------|---------|
-| `/api/*`, `/health` | Lambda Function URL | API requests proxied to Lambda |
-| `/*` (default) | S3 bucket (via OAC) | Frontend static assets |
-
-SPA routing is handled by CloudFront custom error responses: both 403 and 404
-errors from S3 are rewritten to serve `/index.html` with a 200 status code.
-
----
-
-## 5. Verification
+## 4. Verification
 
 ### Health Check
 
@@ -246,19 +197,6 @@ Expected response:
 }
 ```
 
-### Frontend
-
-After deploying the frontend, get the CloudFront URL:
-
-```bash
-aws cloudformation describe-stacks \
-  --stack-name illuminate-frontend-dev \
-  --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontURL`].OutputValue' \
-  --output text
-```
-
-Open `https://<cloudfront-domain>` in a browser. You should see the login page.
-
 ### Agent Health
 
 Check that agents are running via the AgentCore console or CLI. All five
@@ -266,14 +204,19 @@ container runtimes should be in ACTIVE state.
 
 ### End-to-End Test
 
-1. Open the CloudFront URL in a browser
-2. Log in with the initial Cognito user (created during CDK deploy)
-3. Send a test message like "What tables are available?"
-4. Verify you receive a response with real-time status updates and a final answer
+1. Obtain a Cognito JWT token (sign in via the Cognito User Pool)
+2. Send a test request to the streaming endpoint:
+   ```bash
+   curl -N "$API_URL/api/chat/stream" \
+     -H "Authorization: Bearer <token>" \
+     -H "Content-Type: application/json" \
+     -d '{"message": "What tables are available?", "context_id": "test-123"}'
+   ```
+3. Verify you receive SSE events with real-time status updates and a final `complete` event
 
 ---
 
-## 6. Updating Individual Components
+## 5. Updating Individual Components
 
 ### Update Agent Code Only
 
@@ -293,16 +236,6 @@ cd cdk
 npx cdk deploy IlluminateAPI-dev
 ```
 
-### Update Frontend Only
-
-Rebuild and redeploy the frontend without touching infrastructure:
-
-```bash
-infrastructure/scripts/deploy-frontend.sh dev
-```
-
-This builds the React app, syncs to S3, and invalidates CloudFront.
-
 ### Update Base Infrastructure
 
 ```bash
@@ -315,57 +248,11 @@ npx cdk deploy IlluminateBase-dev
 ```bash
 cd cdk
 npx cdk deploy --all
-
-# Then frontend (deployed separately)
-cd ..
-infrastructure/scripts/deploy-frontend.sh dev
 ```
 
 ---
 
-## 7. Legacy CloudFormation Deployment
-
-> **Note:** This section documents the original CloudFormation + shell script
-> deployment approach. It is still functional but has been **superseded by CDK**
-> for all stacks except the frontend.
-
-Infrastructure was originally managed via four CloudFormation stacks deployed
-in order. All templates live in `infrastructure/cloudformation/`.
-
-### Deployment Order
-
-```
-1-base-infrastructure.yaml
-        |
-        v
-2-agentcore.yaml
-        |
-        v
-3-api-gateway.yaml  (requires agent URLs in SSM)
-        |
-        v
-4-frontend.yaml
-```
-
-### Deploy Commands
-
-```bash
-# Stack 1: Base infrastructure
-infrastructure/scripts/deploy-base.sh dev
-
-# Stack 2: AgentCore CloudFormation resources
-infrastructure/scripts/deploy-agentcore.sh dev
-
-# Stack 3: API Lambda + Function URL
-infrastructure/scripts/deploy-api.sh dev
-
-# Stack 4: Frontend
-infrastructure/scripts/deploy-frontend.sh dev
-```
-
----
-
-## 8. Troubleshooting
+## 6. Troubleshooting
 
 ### Common Errors
 
@@ -432,24 +319,6 @@ On macOS with Docker Desktop, ARM64 builds work natively on Apple Silicon.
 
 **Fix:** Verify both permissions exist in the CDK API stack.
 
-#### CloudFront Returns 403 for Frontend
-
-**Cause:** S3 bucket policy does not allow CloudFront OAC access, or the OAC
-is not attached to the distribution.
-
-**Fix:** Verify the frontend CloudFormation stack deployed successfully and that
-the S3 bucket policy includes the `AllowCloudFrontOAC` statement referencing
-the correct distribution ARN.
-
-#### CORS Errors in Browser
-
-**Cause:** The Lambda's `ALLOWED_ORIGINS` environment variable does not
-include the CloudFront domain.
-
-**Fix:** Update the `AllowedOrigins` in the CDK API stack, or set the
-`ALLOWED_ORIGINS` Lambda environment variable to include the CloudFront URL
-(e.g., `https://dxxxxxxxxxx.cloudfront.net`).
-
 #### Cognito `FORCE_CHANGE_PASSWORD` State
 
 **Cause:** User was created with `admin-create-user` instead of `sign_up`.
@@ -458,16 +327,6 @@ include the CloudFront domain.
 stack creates the initial user via `sign_up` + `admin_confirm_sign_up` using
 an `AwsCustomResource`, which avoids the forced password change state.
 
-#### WAF Blocks Requests
-
-**Cause:** Two separate WAFs are deployed:
-- **REGIONAL** WAF (Base stack) -- attached to any regional resources
-- **GLOBAL/CLOUDFRONT** WAF (Frontend stack) -- attached to the CloudFront distribution
-
-**Fix:** Check WAF logs in CloudWatch. Common false positives come from
-AWS managed rule groups. Adjust the WAF rules in the relevant CDK or
-CloudFormation stack.
-
 #### STM Session Not Found
 
 **Cause:** The `runtimeSessionId` in the `invoke_agent_runtime` call does
@@ -475,7 +334,7 @@ not match an existing STM session, or the memory resource is not provisioned.
 
 **Fix:**
 - Verify the memory resource exists: check SSM parameter `/illuminate/{env}/memory-id`.
-- Check that the Lambda is passing `runtimeSessionId` (the `context_id` from the frontend).
+- Check that the Lambda is passing `runtimeSessionId` (the `context_id` from the client).
 - Verify the IAM role has `bedrock:RetrieveMemorySession` and `bedrock:CreateMemorySession` permissions.
 
 ### Useful Commands
@@ -499,19 +358,13 @@ aws logs tail /aws/lambda/illuminate-api-proxy-dev --follow
 
 # View SSM parameters
 aws ssm get-parameters-by-path --path /illuminate/dev/ --recursive
-
-# Invalidate CloudFront cache manually
-DIST_ID=$(aws cloudformation describe-stacks --stack-name illuminate-frontend-dev \
-  --query 'Stacks[0].Outputs[?OutputKey==`CloudFrontDistributionId`].OutputValue' \
-  --output text)
-aws cloudfront create-invalidation --distribution-id $DIST_ID --paths "/*"
 ```
 
 ### Environment Variables Reference
 
 | Variable | Used By | Description |
 |----------|---------|-------------|
-| `AWS_REGION` | CDK, all scripts | AWS region (default: `us-east-1`) |
+| `AWS_REGION` | CDK | AWS region (default: `us-east-1`) |
 | `SNOWFLAKE_ACCOUNT` | `.env` -> CDK | Snowflake account identifier |
 | `SNOWFLAKE_USER` | `.env` -> CDK | Snowflake service user |
 | `SNOWFLAKE_PASSWORD` | `.env` -> CDK | Snowflake password |
@@ -525,6 +378,3 @@ aws cloudfront create-invalidation --distribution-id $DIST_ID --paths "/*"
 | `USER_POOL_CLIENT_ID` | Lambda (via SSM) | Cognito App Client ID |
 | `MEMORY_ID` | Lambda (via SSM) | AgentCore Memory resource ID |
 | `ALLOWED_ORIGINS` | Lambda | Comma-separated CORS origins |
-| `VITE_API_URL` | Frontend build | API endpoint URL (Function URL) |
-| `VITE_USER_POOL_ID` | Frontend build | Cognito User Pool ID |
-| `VITE_USER_POOL_CLIENT_ID` | Frontend build | Cognito App Client ID |

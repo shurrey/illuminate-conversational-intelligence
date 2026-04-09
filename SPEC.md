@@ -9,8 +9,8 @@
 > - **No Cortex Analyst:** The LLM generates SQL directly from schema introspection
 >   rather than using Snowflake Cortex Analyst with semantic models.
 > - **Auth:** Amazon Cognito JWT authentication (not stub auth or institutional SSO).
-> - **No assistant-ui:** Custom React components (ChatContainer, MessageBubble, etc.)
->   instead of the assistant-ui library.
+> - **Frontend separated:** The frontend is now a separate project (illuminate-poc-frontend).
+>   This repo is the backend only.
 > - **Infrastructure:** AWS CDK (TypeScript, 3 stacks) replaced the planned CloudFormation
 >   approach. Agents run as Docker containers on AgentCore, not zip-based runtimes.
 > - **Lambda proxy:** Uses Lambda Web Adapter (LWA) for real SSE streaming instead of Mangum.

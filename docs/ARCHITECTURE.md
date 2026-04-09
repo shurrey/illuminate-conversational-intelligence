@@ -1,4 +1,4 @@
-# Illuminate Conversational Intelligence -- Architecture
+# Illuminate POC Backend -- Architecture
 
 ## Table of Contents
 
@@ -6,7 +6,7 @@
 2. [Agent Architecture](#2-agent-architecture)
 3. [Request Flow](#3-request-flow)
 4. [Authentication and Security](#4-authentication-and-security)
-5. [Data Flow for Chart and Visualization Generation](#5-data-flow-for-chart-and-visualization-generation)
+5. [Data Flow for Chart Generation](#5-data-flow-for-chart-generation)
 6. [SQL Transparency](#6-sql-transparency)
 7. [Real-Time Tool Status](#7-real-time-tool-status)
 8. [Conversation Context Management](#8-conversation-context-management)
@@ -18,35 +18,29 @@
 
 ## 1. System Overview
 
-Illuminate Conversational Intelligence (ICI) is a multi-agent system that enables educational administrators to query, analyze, and visualize institutional data through natural language. Users ask questions in plain English; the system translates those into SQL queries against a Snowflake data warehouse, analyzes the results, writes a polished response, validates it for FERPA compliance, and returns the answer -- optionally with interactive charts.
+Illuminate POC Backend is a multi-agent system that enables educational administrators to query, analyze, and visualize institutional data through natural language. Users ask questions in plain English; the system translates those into SQL queries against a Snowflake data warehouse, analyzes the results, writes a polished response, validates it for FERPA compliance, and returns the answer -- optionally with chart data.
 
-All agent logic runs on **AWS Bedrock AgentCore** as self-contained containerized A2A (Agent-to-Agent) protocol runtimes. A thin Lambda proxy sits between the frontend and the orchestrator. The frontend is a React SPA served from S3 via CloudFront.
+All agent logic runs on **AWS Bedrock AgentCore** as self-contained containerized A2A (Agent-to-Agent) protocol runtimes. A thin Lambda proxy sits between API clients and the orchestrator, handling JWT validation, artifact extraction, and SSE streaming.
 
 ### High-Level Architecture
 
 ```
                            +---------------------------+
-                           |     React SPA (Vite)      |
-                           |  Cognito Auth, Plotly.js  |
-                           |  sql-formatter            |
+                           |       API Client          |
+                           |  (any HTTP client w/ JWT) |
                            +-------------|-------------+
                                          |
-                    Static assets        | API calls
-                    via CloudFront       | (HTTPS, JWT)
-                         |               |
-            +------------|---------------|------------------+
-            |            v               v                  |
-            |   +----------------+   +------------------+  |
-            |   |  S3 Bucket     |   | Lambda Fn URL    |  |
-            |   |  (OAC, priv.)  |   | (FastAPI + LWA)  |  |
-            |   +----------------+   +--------|--------+   |
-            |                                 |            |
-            |        CloudFront (WAF)         |            |
-            +---------------------------------|------------+
-                                              |
+                                   API calls
+                                   (HTTPS, JWT)
+                                         |
+                              +----------|----------+
+                              | Lambda Function URL |
+                              | (FastAPI + LWA)     |
+                              +----------|----------+
+                                         |
                            boto3 invoke_agent_runtime (SigV4)
-                                              |
-                                              v
+                                         |
+                                         v
                     +--------------------------------------------------+
                     |          AWS Bedrock AgentCore                    |
                     |          (Docker containers, ARM64)               |
@@ -79,7 +73,6 @@ All agent logic runs on **AWS Bedrock AgentCore** as self-contained containerize
 
 | Layer          | Technology                                       |
 |----------------|--------------------------------------------------|
-| Frontend       | React 18, TypeScript, Vite, TailwindCSS, Plotly, sql-formatter |
 | Auth           | Amazon Cognito (User Pool + SRP auth, LITE tier) |
 | API Proxy      | AWS Lambda (Python 3.13, FastAPI, Lambda Web Adapter) |
 | Agent Runtime  | AWS Bedrock AgentCore, Strands Agents SDK        |
@@ -87,7 +80,7 @@ All agent logic runs on **AWS Bedrock AgentCore** as self-contained containerize
 | Models         | Claude Sonnet 4.6 (via Bedrock cross-region inference) |
 | Data Store     | Snowflake (snowflake-connector-python)           |
 | Secrets        | AWS Secrets Manager                               |
-| CDN / WAF      | CloudFront, WAFv2 (CLOUDFRONT scope)             |
+| WAF            | WAFv2 (REGIONAL scope)                           |
 | IaC            | AWS CDK (TypeScript, 3 stacks: Base, AgentCore, API) |
 
 ---
@@ -102,7 +95,7 @@ Each agent follows the same structural pattern:
 2. Define domain-specific `@tool` functions.
 3. Create a `strands.Agent` with a system prompt and tools.
 4. Build the ASGI app via `build_a2a_app(agent)`.
-5. Listen on **port 8080** (LWA convention).
+5. Listen on **port 8080** (container convention).
 
 ### 2.1 Orchestrator Agent
 
@@ -117,7 +110,7 @@ The orchestrator is the only agent the Lambda proxy communicates with. It receiv
 
 The orchestrator also hosts a **pure ASGI context enrichment middleware** that intercepts incoming A2A `message/send` requests and routes `contextId` to STM (Short-Term Memory) sessions via `AgentCoreMemorySessionManager`. See Section 8 for details.
 
-The system prompt includes `[TOOL_STATUS:agent_name]` markers that the Lambda proxy extracts for real-time frontend status updates. See Section 7.
+The system prompt includes `[TOOL_STATUS:agent_name]` markers that the Lambda proxy extracts for real-time status updates. See Section 7.
 
 The system prompt instructs the orchestrator to follow a standard pipeline for data questions:
 
@@ -204,12 +197,12 @@ The validator returns a structured assessment: `passed`, `failed`, `warning`, or
 
 ## 3. Request Flow
 
-A complete request from the user's browser to the final response follows this path:
+A complete request from an API client to the final response follows this path:
 
 ### Step-by-Step
 
 ```
-Browser                Lambda Fn URL        AgentCore Orchestrator       Specialists
+API Client               Lambda Fn URL        AgentCore Orchestrator       Specialists
   |                         |                         |                       |
   |  1. POST /api/chat/stream                         |                       |
   |    {message, context_id}|                         |                       |
@@ -268,15 +261,11 @@ Browser                Lambda Fn URL        AgentCore Orchestrator       Special
   |    {text, artifacts,    |                         |                       |
   |     contextId}}         |                         |                       |
   |<------------------------|                         |                       |
-  |                         |                         |                       |
-  | 14. Render text +       |                         |                       |
-  |     Plotly chart +      |                         |                       |
-  |     SQL badge           |                         |                       |
 ```
 
 ### Detailed Steps
 
-1. **Browser sends request.** The frontend's `AgentClient.sendMessageStreaming()` POSTs to `/api/chat/stream` with a JSON body containing the message text and a `context_id` (for conversation continuity). The `Authorization: Bearer <id_token>` header carries the Cognito JWT.
+1. **API client sends request.** The client POSTs to `/api/chat/stream` with a JSON body containing the message text and a `context_id` (for conversation continuity). The `Authorization: Bearer <id_token>` header carries the Cognito JWT.
 
 2. **Lambda validates JWT.** The Lambda handler (`lambda_handler.py`) fetches the Cognito JWKS (cached for 1 hour), locates the signing key by `kid`, and verifies the RS256 signature, audience, and issuer claims. Invalid tokens receive HTTP 401.
 
@@ -298,11 +287,9 @@ Browser                Lambda Fn URL        AgentCore Orchestrator       Special
 
 11. **Orchestrator returns the response.** The A2A response flows back through the AgentCore runtime to the Lambda proxy. The response text may contain `[CHART_CONFIG]...[/CHART_CONFIG]` and `[SQL_QUERY]...[/SQL_QUERY]` markers.
 
-12. **Lambda extracts artifacts.** Regex patterns find all `[CHART_CONFIG]` and `[SQL_QUERY]` blocks, parse them, create frontend-compatible artifact objects (chart or sql type), strip the markers from the text, and clean up whitespace.
+12. **Lambda extracts artifacts.** Regex patterns find all `[CHART_CONFIG]` and `[SQL_QUERY]` blocks, parse them, create artifact objects (chart or sql type), strip the markers from the text, and clean up whitespace.
 
 13. **Lambda streams SSE response.** The response is sent as a real-time Server-Sent Events stream via Lambda Web Adapter. The final event has `type: "complete"` with `data.text` (cleaned markdown), `data.artifacts` (chart and SQL objects), and `data.contextId`.
-
-14. **Frontend renders the response.** `MessageBubble` displays the markdown text. If chart artifacts are present, `ChartRenderer` lazy-loads Plotly.js and renders interactive charts. If SQL artifacts are present, a "View SQL" badge is shown that opens `SqlModal` with formatted SQL, copy button, and prev/next navigation.
 
 ---
 
@@ -311,7 +298,7 @@ Browser                Lambda Fn URL        AgentCore Orchestrator       Special
 ### 4.1 User Authentication (Cognito)
 
 ```
-Browser                         Cognito                      Lambda
+API Client                      Cognito                      Lambda
   |                                |                           |
   | 1. authenticateUser(SRP)       |                           |
   |------------------------------->|                           |
@@ -335,8 +322,6 @@ Browser                         Cognito                      Lambda
 - **User Pool:** `illuminate-users-{env}` with email-based sign-in, Cognito LITE tier.
 - **Password Policy:** Minimum 12 characters, requires upper + lower + number + symbol.
 - **Auth Flows:** SRP, User Password, and Refresh Token.
-- **Frontend Library:** `amazon-cognito-identity-js` handles SRP authentication directly against Cognito (no hosted UI).
-- **Token Storage:** The frontend stores the auth state (user, token) in `localStorage` under the key `illuminate_auth`.
 - **JWT Validation:** The Lambda validates the Cognito ID token on every request. JWKS is fetched from `https://cognito-idp.{region}.amazonaws.com/{pool_id}/.well-known/jwks.json` and cached for 1 hour.
 - **Initial User Creation:** CDK creates the first user via `AwsCustomResource` on initial deployment, using the `INITIAL_USER_EMAIL` and `INITIAL_USER_PASSWORD` values from `.env`.
 
@@ -354,32 +339,26 @@ No API keys, shared secrets, or long-lived credentials are used between services
 
 ### 4.3 WAF (Web Application Firewall)
 
-Two WAF WebACLs protect the system:
+A REGIONAL WAF WebACL protects the system:
 
 | WAF                  | Scope       | Attached To      | Rules                                        |
 |----------------------|-------------|------------------|----------------------------------------------|
 | `illuminate-waf`     | REGIONAL    | (base stack)     | Rate limiting, Common Rules, SQLi, Bad Inputs |
-| `illuminate-cf-waf`  | CLOUDFRONT  | CloudFront dist. | Rate limiting, Common Rules, SQLi, Bad Inputs |
 
-CloudFront requires a CLOUDFRONT-scoped WAF (deployed in `us-east-1`), so the base stack's REGIONAL WAF cannot be reused. Both WAFs apply:
+The WAF applies:
 
 - **Rate limiting:** 2000 req/5min per IP (dev), 1000 req/5min (prod).
 - **AWS Managed Rules:** Common Rule Set, SQL Injection Rule Set, Known Bad Inputs Rule Set.
-- **SizeRestrictions_BODY excluded** on the CloudFront WAF to allow large agent request/response bodies.
 
 ### 4.4 CORS
 
-CORS is handled by **FastAPI CORSMiddleware** in the Lambda handler, not by the Lambda Function URL configuration (to avoid duplicate headers). Allowed origins are configured via the `ALLOWED_ORIGINS` environment variable:
-
-- **Dev:** `http://localhost:3000`, `http://localhost:5173`, plus the CloudFront domain.
-- **Prod:** `https://illuminate.anthology.com`, plus the CloudFront domain.
+CORS is handled by **FastAPI CORSMiddleware** in the Lambda handler, not by the Lambda Function URL configuration (to avoid duplicate headers). Allowed origins are configured via the `ALLOWED_ORIGINS` environment variable.
 
 ### 4.5 Network Security
 
 - The Lambda function runs in **private subnets** within the VPC (`10.0.11.0/24`, `10.0.12.0/24`).
 - Outbound internet access (for Cognito JWKS, AgentCore API) is via a **NAT Gateway** in a public subnet.
 - A **security group** restricts inbound traffic to HTTPS (port 443) from within the same security group.
-- The S3 frontend bucket is fully private; access is exclusively via **CloudFront Origin Access Control (OAC)**.
 
 ### 4.6 FERPA Compliance
 
@@ -392,9 +371,9 @@ FERPA (Family Educational Rights and Privacy Act) compliance is enforced at mult
 
 ---
 
-## 5. Data Flow for Chart and Visualization Generation
+## 5. Data Flow for Chart Generation
 
-Charts are generated through a text-marker protocol that bridges the LLM's text output and the frontend's Plotly rendering.
+Charts are generated through a text-marker protocol. The Lambda extracts chart specifications from the LLM's text output and returns them as structured artifact objects in the API response.
 
 ### Why Text Markers?
 
@@ -453,30 +432,13 @@ Supported `chart_type` values: `bar`, `line`, `pie`, `scatter`, `histogram`.
           |
 6. Lambda sends SSE event:
    data: {"type": "complete", "data": {"text": "...", "artifacts": [...]}}
-          |
-7. Frontend MessageBubble detects artifacts with type "chart"
-   ChartRenderer lazy-loads react-plotly.js
-   chartConfigToPlotly() converts the config to Plotly trace/layout format
-   Plotly renders an interactive chart (zoom, pan, hover, export)
 ```
-
-### Frontend Chart Types
-
-The `chartConfigToPlotly()` function in `types/visualization.ts` maps each `chart_type` to a Plotly trace type:
-
-| ICI chart_type | Plotly type | Notes                              |
-|----------------|-------------|------------------------------------|
-| `bar`          | `bar`       | x/y from data keys                |
-| `line`         | `scatter`   | mode: `lines+markers`             |
-| `pie`          | `pie`       | labels from x_axis, values from y_axis |
-| `scatter`      | `scatter`   | mode: `markers`                   |
-| `histogram`    | `histogram` | x from data keys                  |
 
 ---
 
 ## 6. SQL Transparency
 
-Every SQL query executed by the SQL Agent is surfaced to the user as a navigable artifact, enabling full transparency into what queries were run.
+Every SQL query executed by the SQL Agent is surfaced as a navigable artifact, enabling full transparency into what queries were run.
 
 ### Marker Format
 
@@ -488,21 +450,19 @@ Every SQL query executed by the SQL Agent is surfaced to the user as a navigable
 
 1. The SQL Agent wraps every executed query in `[SQL_QUERY]...[/SQL_QUERY]` markers within its response text.
 2. The Lambda proxy extracts these markers using a regex, creates artifact objects with `type: "sql"`.
-3. The frontend renders each SQL artifact as a "View SQL" badge inline with the message.
-4. Clicking the badge opens `SqlModal`, which displays the SQL formatted with `sql-formatter`.
-5. The modal includes a copy-to-clipboard button and prev/next navigation when multiple SQL queries are present.
+3. The artifacts are returned to the API client in the response, which can render or display them as needed.
 
 ---
 
 ## 7. Real-Time Tool Status
 
-The system provides real-time status updates to the frontend as the orchestrator invokes each specialist agent. This gives users visibility into which step of the pipeline is currently executing.
+The system provides real-time status updates as the orchestrator invokes each specialist agent. This gives API clients visibility into which step of the pipeline is currently executing.
 
 ### How It Works
 
 1. The orchestrator's system prompt includes `[TOOL_STATUS:agent_name]` markers that the LLM emits before calling each specialist tool.
 2. As the Lambda proxy streams the response from AgentCore, it detects these markers in the SSE stream.
-3. Each detected marker is sent to the frontend as a `status` SSE event (e.g., `{"type": "status", "message": "Querying database..."}`).
+3. Each detected marker is sent to the client as a `status` SSE event (e.g., `{"type": "status", "message": "Querying database..."}`).
 4. The markers are stripped from the final response text.
 
 This approach requires no custom tool-call instrumentation -- the LLM naturally emits the markers as part of its reasoning, and the Lambda extracts them during streaming.
@@ -534,7 +494,7 @@ The system originally used an in-memory dictionary on the orchestrator container
 
 - **Memory resource** is provisioned by CDK in the AgentCore stack.
 - **Event expiry:** 24 hours (configurable).
-- **Session ID:** Uses the frontend's `context_id` (UUID per conversation), passed as `runtimeSessionId` in the `invoke_agent_runtime()` call.
+- **Session ID:** Uses the client's `context_id` (UUID per conversation), passed as `runtimeSessionId` in the `invoke_agent_runtime()` call.
 
 ---
 
@@ -569,17 +529,15 @@ The system is deployed via **AWS CDK** (TypeScript) organized into three stacks.
 +-----------------------------------+
 ```
 
-A fourth stack (`IlluminateFrontend-{env}`) for S3 + CloudFront exists in `cdk/lib/frontend/` but is currently deployed separately via the legacy shell scripts.
-
 ### SSM Service Discovery
 
 All stacks communicate via SSM Parameter Store. Key parameters:
 
 | Parameter | Set By | Used By |
 |-----------|--------|---------|
-| `/illuminate/{env}/cognito-pool-id` | Base | API, Frontend |
-| `/illuminate/{env}/cognito-client-id` | Base | API, Frontend |
-| `/illuminate/{env}/api-url` | API | Frontend |
+| `/illuminate/{env}/cognito-pool-id` | Base | API |
+| `/illuminate/{env}/cognito-client-id` | Base | API |
+| `/illuminate/{env}/api-url` | API | External clients |
 | `/illuminate/{env}/orchestrator-arn` | AgentCore | API |
 | `/illuminate/{env}/memory-id` | AgentCore | API |
 | `/illuminate/{env}/sql-arn` | AgentCore | Orchestrator |
@@ -598,14 +556,6 @@ How it works:
 4. SSE events are streamed to the client in real time (not batched).
 
 This replaces the previous Mangum-based approach, which required `BUFFERED` invoke mode and delivered SSE events in batches rather than in real time.
-
-### Legacy Infrastructure
-
-The `infrastructure/` directory contains the original CloudFormation templates and shell scripts:
-- `infrastructure/cloudformation/` -- 4 YAML stacks (superseded by CDK)
-- `infrastructure/scripts/` -- Deployment shell scripts
-
-These are still functional but superseded by CDK for all stacks except the frontend, which is still deployed via `infrastructure/scripts/deploy-frontend.sh`.
 
 ---
 
@@ -672,14 +622,13 @@ Several approaches were considered for chart generation:
 |-----------------------------|-----------------------------------------------------|
 | Structured output / JSON mode | Loses natural language response; requires dual calls |
 | Separate "chart" artifact type in A2A | Requires protocol extension; markers get stripped at intermediaries |
-| Frontend-side LLM call      | Adds latency, cost, and complexity                  |
 | Server-side image rendering  | Static images; no interactivity; large payloads     |
 
 **Text markers win** because they:
 - Travel transparently through every layer (AgentCore, A2A response, Lambda).
 - Allow a single LLM response to contain prose + chart data.
 - Are trivially parsed by a regex on the Lambda side.
-- Enable the frontend to render interactive Plotly charts (zoom, pan, hover, PNG export).
+- Enable clients to render interactive charts from the structured data.
 
 ### 11.4 Why Lambda Web Adapter Over Mangum?
 
@@ -689,28 +638,19 @@ Mangum wraps ASGI apps for Lambda but only supports `BUFFERED` invoke mode. This
 - **Standard ASGI:** The FastAPI app runs unmodified -- no Mangum wrapper needed.
 - **Tool status updates:** Real-time `[TOOL_STATUS]` markers are sent as they are detected, giving users immediate feedback on pipeline progress.
 
-### 11.5 Why Direct Lambda Function URL (Bypassing CloudFront for API)?
+### 11.5 Why a Thin Lambda Proxy (Not Direct AgentCore Access)?
 
-The original architecture routed all traffic through CloudFront. This was changed because:
-
-- **CloudFront has a 60-second origin response timeout** (not configurable for custom origins). Agent queries involving the full pipeline (SQL + Analysis + Writing + Validation) routinely take 90-180 seconds.
-- **Lambda Function URLs have no such timeout.** The Lambda itself has a 900-second timeout, and the Function URL inherits it.
-- **The frontend calls the Function URL directly** for `/api/*` routes, using the `VITE_API_URL` environment variable set to the Function URL domain.
-- **CloudFront still serves static files** (JS, CSS, images) from S3, benefiting from edge caching and the SPA routing function.
-
-### 11.6 Model Selection Rationale
-
-All agents currently use Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) via Bedrock cross-region inference profiles. This provides a good balance of quality and speed across all agent roles.
-
-### 11.7 Why a Thin Lambda Proxy (Not Direct AgentCore Access)?
-
-The Lambda handler exists as a thin translation layer between the frontend and AgentCore for several reasons:
+The Lambda handler exists as a thin translation layer between API clients and AgentCore for several reasons:
 
 - **JWT validation:** AgentCore runtimes use IAM auth (SigV4), not Cognito JWTs. The Lambda validates the user's Cognito token and then calls AgentCore with its IAM role.
-- **Artifact extraction:** The Lambda extracts `[CHART_CONFIG]` and `[SQL_QUERY]` markers from LLM text and transforms them into frontend-compatible artifact objects.
+- **Artifact extraction:** The Lambda extracts `[CHART_CONFIG]` and `[SQL_QUERY]` markers from LLM text and transforms them into structured artifact objects.
 - **Tool status detection:** The Lambda detects `[TOOL_STATUS]` markers during streaming and converts them to real-time status SSE events.
-- **Protocol translation:** The frontend sends a simplified JSON body; the Lambda constructs the full A2A JSON-RPC envelope and handles response parsing.
+- **Protocol translation:** API clients send a simplified JSON body; the Lambda constructs the full A2A JSON-RPC envelope and handles response parsing.
 - **CORS handling:** FastAPI's CORSMiddleware manages CORS headers centrally.
 - **Request cancellation:** The Lambda tracks cancelled request IDs and terminates SSE streams.
 
 The Lambda contains zero agent logic -- all reasoning, tool calls, and data processing happen in AgentCore runtimes.
+
+### 11.6 Model Selection Rationale
+
+All agents currently use Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) via Bedrock cross-region inference profiles. This provides a good balance of quality and speed across all agent roles.

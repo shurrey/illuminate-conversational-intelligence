@@ -1,9 +1,6 @@
-# Illuminate API Reference
+# Illuminate POC Backend - API Reference
 
-The Illuminate API is served by a Lambda proxy (`lambda_handler.py`) built with FastAPI and running via Lambda Web Adapter (LWA) for real SSE streaming. All traffic is routed through CloudFront:
-
-- `/*` routes to S3 (frontend static assets)
-- `/api/*` and `/health` route to the Lambda Function URL
+The Illuminate API is served by a Lambda proxy (`lambda_handler.py`) built with FastAPI and running via Lambda Web Adapter (LWA) for real SSE streaming. The API is accessed directly via the Lambda Function URL.
 
 Streaming responses are delivered as real-time Server-Sent Events via the Function URL's `RESPONSE_STREAM` invoke mode (not buffered).
 
@@ -19,7 +16,7 @@ Tokens are issued by the Cognito User Pool (`illuminate-users-dev`).
 
 ## CORS
 
-CORS is configured to allow requests from the CloudFront distribution domain and `localhost` development origins.
+CORS is configured via the `ALLOWED_ORIGINS` environment variable on the Lambda. Allowed origins typically include `localhost` development origins and any production domains.
 
 ---
 
@@ -123,7 +120,7 @@ The endpoint also accepts the full A2A JSON-RPC 2.0 format:
 
 ### POST /api/chat/stream
 
-Streaming chat request via **Server-Sent Events (SSE)**. This is the primary endpoint used by the frontend. It sends a message to the orchestrator and streams back real-time status updates and the final response.
+Streaming chat request via **Server-Sent Events (SSE)**. This is the primary endpoint for real-time interaction. It sends a message to the orchestrator and streams back real-time status updates and the final response.
 
 Streaming is real-time (not buffered) thanks to Lambda Web Adapter running uvicorn inside Lambda with `RESPONSE_STREAM` invoke mode.
 
@@ -265,9 +262,294 @@ Clear all messages in a conversation.
 
 ---
 
+### GET /api/v1/dictionary/submodels
+
+Returns the list of available data submodels (schemas) in the data dictionary.
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+
+**Response** `200 OK`
+
+```json
+[
+  {
+    "id": 1,
+    "name": "cdm_lms",
+    "displayName": "LMS Common Data Model",
+    "schemaId": "CDM_LMS"
+  }
+]
+```
+
+| Field         | Type   | Description                                |
+| ------------- | ------ | ------------------------------------------ |
+| `id`          | number | Unique identifier for the submodel.        |
+| `name`        | string | Internal name of the submodel.             |
+| `displayName` | string | Human-readable display name.               |
+| `schemaId`    | string | Snowflake schema identifier.               |
+
+---
+
+### GET /api/v1/dictionary/definitions
+
+Returns all data dictionary definitions (metrics, dimensions, columns).
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+
+**Response** `200 OK`
+
+```json
+[
+  {
+    "id": 1,
+    "name": "person_id",
+    "displayName": "Person ID",
+    "text": "Unique identifier for a person record.",
+    "boundSchema": "CDM_LMS",
+    "boundTable": "PERSON",
+    "boundColumn": "PERSON_ID",
+    "columnDataType": "NUMBER",
+    "columnIsIdentity": true,
+    "columnIsNullable": false,
+    "sourceType": "column",
+    "isDeleted": false,
+    "isDeprecated": false,
+    "isVisible": true,
+    "created": "2024-01-15T00:00:00Z",
+    "lastModified": "2024-06-01T00:00:00Z",
+    "majorVersion": 1,
+    "minorVersion": 0,
+    "technicalSpecifications": [
+      {
+        "objectIdentifier": "CDM_LMS.PERSON.PERSON_ID",
+        "sourceProduct": "Learn",
+        "isAvailableInSourceProduct": true,
+        "isPii": false,
+        "grainAttributes": ["PERSON_ID"],
+        "majorVersion": 1,
+        "minorVersion": 0,
+        "lastModified": "2024-06-01T00:00:00Z"
+      }
+    ]
+  }
+]
+```
+
+| Field                    | Type        | Description                                           |
+| ------------------------ | ----------- | ----------------------------------------------------- |
+| `id`                     | number      | Unique identifier for the definition.                 |
+| `name`                   | string      | Internal name.                                        |
+| `displayName`            | string      | Human-readable display name.                          |
+| `text`                   | string      | Description of the definition.                        |
+| `boundSchema`            | string      | Snowflake schema this definition belongs to.          |
+| `boundTable`             | string      | Snowflake table this definition is bound to.          |
+| `boundColumn`            | string\|null | Snowflake column (null for table-level definitions). |
+| `columnDataType`         | string\|null | Snowflake column data type.                          |
+| `columnIsIdentity`       | boolean     | Whether the column is an identity column.             |
+| `columnIsNullable`       | boolean     | Whether the column allows nulls.                      |
+| `sourceType`             | string      | Type of definition (`column`, `table`, `metric`).     |
+| `isDeleted`              | boolean     | Soft-delete flag.                                     |
+| `isDeprecated`           | boolean     | Deprecation flag.                                     |
+| `isVisible`              | boolean     | Visibility flag.                                      |
+| `created`                | string      | ISO 8601 creation timestamp.                          |
+| `lastModified`           | string      | ISO 8601 last modification timestamp.                 |
+| `majorVersion`           | number      | Major version number.                                 |
+| `minorVersion`           | number      | Minor version number.                                 |
+| `technicalSpecifications` | array      | Array of technical specification objects.             |
+
+**Technical Specification Object**
+
+| Field                        | Type     | Description                                        |
+| ---------------------------- | -------- | -------------------------------------------------- |
+| `objectIdentifier`           | string   | Fully qualified object name.                       |
+| `sourceProduct`              | string   | Source product name.                                |
+| `isAvailableInSourceProduct` | boolean  | Whether available in the source product.           |
+| `isPii`                      | boolean  | Whether the field contains PII.                    |
+| `grainAttributes`            | string[] | Grain attribute names.                             |
+| `majorVersion`               | number   | Major version number.                              |
+| `minorVersion`               | number   | Minor version number.                              |
+| `lastModified`               | string   | ISO 8601 last modification timestamp.              |
+
+---
+
+### GET /api/v1/dictionary/erd
+
+Returns the Entity Relationship Diagram data, including foreign key relationships between tables.
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+
+**Response** `200 OK`
+
+```json
+{
+  "schemas": [
+    {
+      "foreignKeys": [
+        {
+          "foreignKey": {
+            "constraintName": "FK_ENROLLMENT_PERSON",
+            "tableFQN": "CDM_LMS.ENROLLMENT",
+            "tableName": "ENROLLMENT",
+            "tableSchema": "CDM_LMS",
+            "cardinality": "MANY",
+            "columns": [
+              {
+                "FQN": "CDM_LMS.ENROLLMENT.PERSON_ID",
+                "name": "PERSON_ID",
+                "ordinalPosition": 1
+              }
+            ]
+          },
+          "uniqueKey": {
+            "constraintName": "PK_PERSON",
+            "tableFQN": "CDM_LMS.PERSON",
+            "tableName": "PERSON",
+            "tableSchema": "CDM_LMS",
+            "cardinality": "ONE",
+            "columns": [
+              {
+                "FQN": "CDM_LMS.PERSON.PERSON_ID",
+                "name": "PERSON_ID",
+                "ordinalPosition": 1
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+| Field                         | Type   | Description                                     |
+| ----------------------------- | ------ | ----------------------------------------------- |
+| `schemas`                     | array  | Array of schema objects containing relationships.|
+| `schemas[].foreignKeys`       | array  | Array of foreign key relationship objects.       |
+| `foreignKey.constraintName`   | string | Name of the foreign key constraint.             |
+| `foreignKey.tableFQN`         | string | Fully qualified table name.                     |
+| `foreignKey.tableName`        | string | Table name.                                     |
+| `foreignKey.tableSchema`      | string | Schema name.                                    |
+| `foreignKey.cardinality`      | string | Relationship cardinality (e.g., `MANY`, `ONE`). |
+| `foreignKey.columns`          | array  | Array of column objects in the key.             |
+| `foreignKey.columns[].FQN`    | string | Fully qualified column name.                    |
+| `foreignKey.columns[].name`   | string | Column name.                                    |
+| `foreignKey.columns[].ordinalPosition` | number | Position of the column in the key.     |
+| `uniqueKey`                   | object | Same shape as `foreignKey`, representing the referenced unique/primary key. |
+
+---
+
+### GET /api/v1/dictionary/preview
+
+Returns a preview of data from a specific table.
+
+**Query Parameters**
+
+| Parameter | Type   | Required | Description                          |
+| --------- | ------ | -------- | ------------------------------------ |
+| `schema`  | string | Yes      | Snowflake schema name (e.g., `CDM_LMS`). |
+| `table`   | string | Yes      | Table name (e.g., `PERSON`).         |
+| `limit`   | number | No       | Maximum rows to return (default: 20).|
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+
+**Example Request**
+
+```
+GET /api/v1/dictionary/preview?schema=CDM_LMS&table=PERSON&limit=20
+```
+
+**Response** `200 OK`
+
+```json
+{
+  "columns": ["PERSON_ID", "FIRST_NAME", "LAST_NAME", "EMAIL"],
+  "rows": [
+    {"PERSON_ID": 1001, "FIRST_NAME": "Jane", "LAST_NAME": "Doe", "EMAIL": "jdoe@example.edu"},
+    {"PERSON_ID": 1002, "FIRST_NAME": "John", "LAST_NAME": "Smith", "EMAIL": "jsmith@example.edu"}
+  ]
+}
+```
+
+| Field     | Type                          | Description                          |
+| --------- | ----------------------------- | ------------------------------------ |
+| `columns` | string[]                      | Ordered list of column names.        |
+| `rows`    | Array<Record<string, unknown>> | Array of row objects keyed by column name. |
+
+---
+
+### POST /api/v1/dashboard/query
+
+Execute an arbitrary SQL query against Snowflake. Intended for dashboard and visualization use cases.
+
+**Headers**
+
+| Header          | Value                        | Required |
+| --------------- | ---------------------------- | -------- |
+| Authorization   | `Bearer <cognito_jwt_token>` | Yes      |
+| Content-Type    | `application/json`           | Yes      |
+
+**Request Body**
+
+```json
+{
+  "sql": "SELECT department, COUNT(*) as enrollment FROM DATABASE.CDM_LMS.ENROLLMENTS GROUP BY department"
+}
+```
+
+| Field | Type   | Description                     |
+| ----- | ------ | ------------------------------- |
+| `sql` | string | The SQL query to execute.       |
+
+**Response** `200 OK` (success)
+
+```json
+{
+  "columns": ["DEPARTMENT", "ENROLLMENT"],
+  "rows": [
+    {"DEPARTMENT": "Computer Science", "ENROLLMENT": 342},
+    {"DEPARTMENT": "Mathematics", "ENROLLMENT": 218}
+  ]
+}
+```
+
+| Field     | Type                          | Description                          |
+| --------- | ----------------------------- | ------------------------------------ |
+| `columns` | string[]                      | Ordered list of column names.        |
+| `rows`    | Array<Record<string, unknown>> | Array of row objects keyed by column name. |
+
+**Response** `200 OK` (error)
+
+```json
+{
+  "error": "SQL compilation error: Object 'DATABASE.CDM_LMS.NONEXISTENT' does not exist."
+}
+```
+
+| Field   | Type   | Description                              |
+| ------- | ------ | ---------------------------------------- |
+| `error` | string | Error message from query execution.      |
+
+---
+
 ## Artifacts
 
-Agents may return **artifacts** alongside text responses. Artifacts represent structured data such as charts, tables, or SQL queries that the frontend renders as interactive visualizations or modals.
+Agents may return **artifacts** alongside text responses. Artifacts represent structured data such as charts, tables, or SQL queries. They are returned in the `artifacts` array of the API response.
 
 ### Chart artifact
 
@@ -324,7 +606,7 @@ Agents may return **artifacts** alongside text responses. Artifacts represent st
 | `title`      | string | Display title (typically "SQL Query").                       |
 | `data.query` | string | The raw SQL query that was executed against Snowflake.       |
 
-The frontend renders SQL artifacts as a "View SQL" badge inline with the message text. Clicking the badge opens a modal (`SqlModal`) that displays the SQL formatted with `sql-formatter`, includes a copy-to-clipboard button, and provides prev/next navigation when multiple SQL queries are present in a single response.
+API clients can render SQL artifacts as they see fit -- for example, displaying formatted SQL in a modal with copy-to-clipboard functionality.
 
 ### Other artifact types
 
