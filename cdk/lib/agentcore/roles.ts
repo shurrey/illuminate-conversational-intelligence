@@ -31,6 +31,14 @@ export class AgentRole extends Construct {
       ],
     }));
 
+    // Bedrock Guardrails — agents must be able to apply guardrails to requests
+    this.role.addToPolicy(new iam.PolicyStatement({
+      actions: ['bedrock:ApplyGuardrail'],
+      resources: [
+        `arn:aws:bedrock:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:guardrail/*`,
+      ],
+    }));
+
     // Snowflake credentials
     this.role.addToPolicy(new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],

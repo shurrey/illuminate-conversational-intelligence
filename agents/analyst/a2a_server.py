@@ -101,11 +101,28 @@ model_id = os.environ.get(
     "BEDROCK_MODEL_ID",
     "us.anthropic.claude-sonnet-4-6",
 )
+
+# Bedrock Guardrails — FERPA compliance filter runs before/after LLM inference
+guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID", "")
+guardrail_version = os.environ.get("BEDROCK_GUARDRAIL_VERSION", "")
+guardrail_config = None
+if guardrail_id and guardrail_version:
+    guardrail_config = {
+        "guardrailIdentifier": guardrail_id,
+        "guardrailVersion": guardrail_version,
+        "trace": "enabled",
+    }
+    log(f"  Guardrail: {guardrail_id} v{guardrail_version}")
+
 bedrock_model = BedrockModel(
     region_name=os.environ.get("AWS_REGION", "us-east-1"),
     model_id=model_id,
+    additional_model_request_fields={
+        "inferenceConfig": {"temperature": 0.3},
+        **({"amazon-bedrock-guardrailConfig": guardrail_config} if guardrail_config else {}),
+    },
 )
-log(f"  Model: {model_id}")
+log(f"  Model: {model_id} (temperature=0.3)")
 
 strands_agent = Agent(
     name="Illuminate Analyst Agent",

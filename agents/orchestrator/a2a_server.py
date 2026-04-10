@@ -97,26 +97,41 @@ from bedrock_agentcore.runtime.a2a import build_a2a_app
 from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
 from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
 
-# Create boto3 client for AgentCore (SigV4 auth via IAM role)
-# Use extended timeout since specialist agents involve LLM calls
+# Create boto3 clients for AgentCore (SigV4 auth via IAM role)
+# Core agents (SQL, Analyst, Writer, Validator) get the full timeout — they're
+# essential to the pipeline and we must wait for them.
+# Advisory agents (Planner, Schema Expert, Data Quality) get a shorter timeout —
+# they improve quality but are not required. If they time out, the orchestrator
+# falls back gracefully and proceeds without them.
 region = os.environ.get("AWS_REGION", "us-east-1")
 _agentcore_client = boto3.client(
     "bedrock-agentcore",
     region_name=region,
     config=Config(read_timeout=300, connect_timeout=10, retries={"max_attempts": 1}),
 )
-log("  Created bedrock-agentcore boto3 client (300s timeout)")
+_advisory_client = boto3.client(
+    "bedrock-agentcore",
+    region_name=region,
+    config=Config(read_timeout=90, connect_timeout=10, retries={"max_attempts": 1}),
+)
+log("  Created bedrock-agentcore boto3 clients (core=300s, advisory=90s)")
 
 # Runtime ARNs from environment
 SQL_AGENT_ARN = os.environ.get("SQL_AGENT_ARN", "")
 ANALYST_AGENT_ARN = os.environ.get("ANALYST_AGENT_ARN", "")
 WRITER_AGENT_ARN = os.environ.get("WRITER_AGENT_ARN", "")
 VALIDATOR_AGENT_ARN = os.environ.get("VALIDATOR_AGENT_ARN", "")
+PLANNER_AGENT_ARN = os.environ.get("PLANNER_AGENT_ARN", "")
+SCHEMA_EXPERT_AGENT_ARN = os.environ.get("SCHEMA_EXPERT_AGENT_ARN", "")
+DATA_QUALITY_AGENT_ARN = os.environ.get("DATA_QUALITY_AGENT_ARN", "")
 
 log(f"  SQL: {SQL_AGENT_ARN}")
 log(f"  Analyst: {ANALYST_AGENT_ARN}")
 log(f"  Writer: {WRITER_AGENT_ARN}")
 log(f"  Validator: {VALIDATOR_AGENT_ARN}")
+log(f"  Planner: {PLANNER_AGENT_ARN}")
+log(f"  Schema Expert: {SCHEMA_EXPERT_AGENT_ARN}")
+log(f"  Data Quality: {DATA_QUALITY_AGENT_ARN}")
 
 # --- Specialist Agent Tools ---
 @tool
@@ -175,35 +190,139 @@ def validate_response(message: str) -> str:
     return invoke_specialist(_agentcore_client, VALIDATOR_AGENT_ARN, message)
 
 
+@tool
+def plan_query(message: str) -> str:
+    """Send a question to the Planner Agent to decompose it into an execution plan.
+
+    Use this for complex or multi-step questions. The Planner classifies difficulty,
+    identifies needed schemas/tables, and returns ordered sub-tasks. For simple
+    questions (single count, schema discovery), skip the planner and go directly
+    to query_database.
+
+    Args:
+        message: The user's question and any conversation context.
+
+    Returns:
+        A structured JSON execution plan with steps, dependencies, and schema hints.
+    """
+    if not PLANNER_AGENT_ARN:
+        return "Planner agent not available. Proceed with direct query."
+    try:
+        log(f"  -> Planner Agent: {message[:100]}...")
+        return invoke_specialist(_advisory_client, PLANNER_AGENT_ARN, message)
+    except Exception as e:
+        log(f"  Planner timed out or failed ({e}), proceeding without plan")
+        return "Planner unavailable (timed out). Proceed directly: use get_schema_guidance for schema info, then query_database for data."
+
+
+@tool
+def get_schema_guidance(message: str) -> str:
+    """Send a question to the Schema Expert to identify relevant tables, columns, and joins.
+
+    The Schema Expert knows the CDM data model deeply and returns a focused mini-schema
+    with only the tables/columns relevant to the question, plus join patterns and PII
+    warnings. Pass the result to query_database along with the user's question.
+
+    Args:
+        message: The question or data need to find schema information for.
+
+    Returns:
+        Focused mini-schema with tables, columns, joins, and FERPA notes.
+    """
+    if not SCHEMA_EXPERT_AGENT_ARN:
+        return "Schema expert not available. Proceed with query_database directly."
+    try:
+        log(f"  -> Schema Expert Agent: {message[:100]}...")
+        return invoke_specialist(_advisory_client, SCHEMA_EXPERT_AGENT_ARN, message)
+    except Exception as e:
+        log(f"  Schema Expert timed out or failed ({e}), proceeding without schema guidance")
+        return "Schema Expert unavailable (timed out). Proceed with query_database directly — the SQL agent can discover schema on its own."
+
+
+@tool
+def check_data_quality(message: str) -> str:
+    """Send query results to the Data Quality Agent to verify the data makes sense.
+
+    Use this after query_database returns results and before passing to analyze_data.
+    The Data Quality agent checks for impossible values, high null rates, value ranges
+    outside business constraints, and statistical inconsistencies.
+
+    Args:
+        message: The query results, original question, and optionally the SQL query.
+
+    Returns:
+        Data quality assessment with status (good/warning/poor) and any issues found.
+    """
+    if not DATA_QUALITY_AGENT_ARN:
+        return "Data quality agent not available. Proceed with analysis."
+    try:
+        log(f"  -> Data Quality Agent: {message[:100]}...")
+        return invoke_specialist(_advisory_client, DATA_QUALITY_AGENT_ARN, message)
+    except Exception as e:
+        log(f"  Data Quality timed out or failed ({e}), proceeding without quality check")
+        return "Data Quality check unavailable (timed out). Proceed with analysis — the data was already validated by SQL agent constraints."
+
+
 # --- System Prompt ---
 SYSTEM_PROMPT = """You are the Illuminate Orchestrator, the central coordinator for an educational data analytics system.
 
 ## Your Role
 You coordinate specialist agents to answer questions about educational data stored in a Snowflake data warehouse.
+You are fully autonomous — you decide which agents to call, in what order, and how many times.
 
 ## Available Tools
 
-1. **query_database**: Send natural language queries to the SQL Agent. It generates and executes
-   SQL queries against the Snowflake data warehouse and returns results as markdown tables.
+### Planning & Schema (use for medium/complex questions)
+1. **plan_query**: Send a question to the Planner Agent. It classifies difficulty (simple/medium/complex),
+   decomposes multi-step questions into ordered sub-tasks, and identifies which schemas/tables are needed.
+   Skip this for simple questions (single counts, schema discovery).
 
-2. **analyze_data**: Send query results to the Analyst Agent for interpretation. It identifies
+2. **get_schema_guidance**: Send a question to the Schema Expert Agent. It knows the CDM data model
+   deeply and returns a focused mini-schema with only the relevant tables, columns, join patterns,
+   and PII warnings. Pass its output to query_database for more accurate SQL.
+
+### Data Pipeline
+3. **query_database**: Send natural language queries to the SQL Agent. It generates and executes
+   SQL queries against the Snowflake data warehouse and returns results as markdown tables.
+   The SQL agent has a verified query library for common patterns — it will use pre-validated SQL
+   when a match is found.
+
+4. **check_data_quality**: Send query results to the Data Quality Agent. It checks for impossible
+   values, high null rates, out-of-range data, and statistical inconsistencies BEFORE the Analyst
+   sees them. Use after query_database, before analyze_data.
+
+5. **analyze_data**: Send query results to the Analyst Agent for interpretation. It identifies
    trends, patterns, statistical insights, and provides recommendations.
 
-3. **write_response**: Send data and analysis to the Writer Agent. It crafts clear, polished
+6. **write_response**: Send data and analysis to the Writer Agent. It crafts clear, polished
    natural language responses suitable for educational administrators.
 
-4. **validate_response**: Send the final response to the Validator Agent. It checks for FERPA
-   compliance, data accuracy, and PII leakage before the response is delivered.
+### Validation
+7. **validate_response**: Send the final response to the Validator Agent. It checks for FERPA
+   compliance, data accuracy, and PII leakage before the response is delivered. Returns structured
+   feedback with error categories and fix suggestions when validation fails.
 
-## Workflow
-For data-related questions, follow this pipeline:
-1. Use `query_database` to get the data from Snowflake
-2. Use `analyze_data` with the query results to get insights
-3. Use `write_response` with data + analysis to craft the final response
-4. Use `validate_response` to verify FERPA compliance and accuracy
-5. Return the validated response to the user
+## Workflow Guidelines
 
-For simple informational questions, you may answer directly without invoking all agents.
+### Simple questions (single count, schema discovery, direct lookup)
+Skip the Planner. Go directly:
+`query_database` → `write_response` → `validate_response`
+
+### Medium questions (multi-table joins, comparisons, trends)
+`get_schema_guidance` → `query_database` → `check_data_quality` → `analyze_data` → `write_response` → `validate_response`
+
+### Complex questions (multi-step analysis, cross-domain correlation)
+`plan_query` → follow the plan's steps, which typically involve:
+`get_schema_guidance` → multiple `query_database` calls → `check_data_quality` → `analyze_data` → `write_response` → `validate_response`
+
+### Important: These are guidelines, not rigid rules
+You are autonomous. You can:
+- Skip agents when they're not needed (e.g., skip Analyst for simple counts)
+- Loop back to SQL after Analyst feedback
+- Run multiple SQL queries for complex questions
+- Have the Validator reject a response and re-route to the appropriate agent
+- Skip the Planner for questions you can handle directly
+- Skip Data Quality for simple, low-risk queries
 
 ## Creating Visualizations (Charts)
 
@@ -268,11 +387,16 @@ were run. This is important for transparency and debugging.
 - Place [SQL_QUERY] markers at the END of your response, after all other content
 
 ## Important Rules
-- Always start with `query_database` when the user asks about data
+- For complex or ambiguous questions, use `plan_query` first to get a structured approach
+- For medium questions involving multi-table joins, use `get_schema_guidance` before `query_database`
+  to give the SQL agent precise table/column/join information
+- Use `check_data_quality` after getting SQL results for any non-trivial query to catch data anomalies
+  BEFORE the Analyst sees them. If quality is "poor", re-route to SQL with fix suggestions
 - When the user asks for a chart/graph/visualization, you MUST include a [CHART_CONFIG] block with actual data
 - Do NOT just describe what a chart would look like — include the [CHART_CONFIG] block so it renders
 - Pass the FULL results between agents — do not summarize prematurely
-- If validation fails, revise the response and re-validate
+- If validation fails, the Validator returns structured feedback with error categories and fix suggestions.
+  Use the fix_suggestions to route back to the correct agent (SQL for data issues, Writer for presentation issues)
 - Never expose individual student data or PII
 - Keep your final response focused and actionable for educational administrators
 - Always include [SQL_QUERY] markers for any SQL queries that were executed"""
@@ -283,11 +407,27 @@ model_id = os.environ.get(
     "BEDROCK_MODEL_ID",
     "us.anthropic.claude-sonnet-4-6",
 )
+# Bedrock Guardrails — FERPA compliance filter runs before/after LLM inference
+guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID", "")
+guardrail_version = os.environ.get("BEDROCK_GUARDRAIL_VERSION", "")
+guardrail_config = None
+if guardrail_id and guardrail_version:
+    guardrail_config = {
+        "guardrailIdentifier": guardrail_id,
+        "guardrailVersion": guardrail_version,
+        "trace": "enabled",
+    }
+    log(f"  Guardrail: {guardrail_id} v{guardrail_version}")
+
 bedrock_model = BedrockModel(
     region_name=region,
     model_id=model_id,
+    additional_model_request_fields={
+        "inferenceConfig": {"temperature": 0.0},
+        **({"amazon-bedrock-guardrailConfig": guardrail_config} if guardrail_config else {}),
+    },
 )
-log(f"  Model: {model_id}")
+log(f"  Model: {model_id} (temperature=0.0)")
 
 # STM memory via AgentCoreMemorySessionManager
 # The session_manager persists conversation history across requests using
@@ -307,10 +447,10 @@ if memory_id:
 
 strands_agent = Agent(
     name="Illuminate Orchestrator",
-    description="Central coordinator for educational data queries. Routes requests to SQL, Analyst, Writer, and Validator agents.",
+    description="Central coordinator for educational data queries. Routes requests to Planner, Schema Expert, SQL, Data Quality, Analyst, Writer, and Validator agents.",
     model=bedrock_model,
     system_prompt=SYSTEM_PROMPT,
-    tools=[query_database, analyze_data, write_response, validate_response],
+    tools=[plan_query, get_schema_guidance, query_database, check_data_quality, analyze_data, write_response, validate_response],
     session_manager=session_manager,
     callback_handler=None,
 )

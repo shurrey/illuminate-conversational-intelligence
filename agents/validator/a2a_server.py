@@ -38,12 +38,24 @@ from bedrock_agentcore.runtime.a2a import build_a2a_app
 
 # --- FERPA PII patterns for rule-based checks ---
 FERPA_PII_PATTERNS = [
-    r'\b\d{3}-\d{2}-\d{4}\b',                                    # SSN
-    r'\b\d{9}\b',                                                  # SSN without dashes
-    r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',     # Email
-    r'\b\d{10}\b',                                                 # Phone numbers
-    r'\b\(\d{3}\)\s*\d{3}-\d{4}\b',                              # Phone with parens
+    (r'\b\d{3}-\d{2}-\d{4}\b', 'SSN (xxx-xx-xxxx)'),
+    (r'\b\d{9}\b', 'SSN without dashes (9 digits)'),
+    (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', 'Email address'),
+    (r'\b\d{10}\b', 'Phone number (10 digits)'),
+    (r'\b\(\d{3}\)\s*\d{3}-\d{4}\b', 'Phone number (xxx) xxx-xxxx'),
+    (r'\b\d{3}-\d{3}-\d{4}\b', 'Phone number xxx-xxx-xxxx'),
+    (r'\b\d{3}\.\d{3}\.\d{4}\b', 'Phone number xxx.xxx.xxxx'),
 ]
+
+# Error taxonomy categories for structured feedback
+ERROR_CATEGORIES = {
+    "pii_leak": "PII detected in response — individual student data exposed",
+    "bad_aggregation": "Data not properly aggregated — fewer than 5 individuals per group",
+    "sql_injection": "Dangerous SQL detected — potential injection or unauthorized operation",
+    "impossible_data": "Data values are mathematically impossible or clearly fabricated",
+    "missing_data": "Response does not address the user's question",
+    "inconsistent_data": "Data is internally inconsistent (e.g., percentages don't sum to 100%)",
+}
 
 # --- System Prompt ---
 VALIDATOR_SYSTEM_PROMPT = """You are a Validation Agent for an educational data analytics system.
@@ -84,12 +96,31 @@ ONLY block responses for:
 - Be strict about FERPA/PII compliance
 - Be lenient about data source verification since agents query internally
 
-When validating, provide your assessment including:
-- Overall status: passed, failed, warning, or needs_review
-- Confidence score (0.0-1.0)
-- Specific checks performed and their results
-- Whether the response should be blocked (only for serious violations)
-- Any recommendations for improvement"""
+When validating, provide your assessment as structured JSON:
+```json
+{
+  "status": "passed|failed|warning",
+  "confidence": 0.0-1.0,
+  "blocked": false,
+  "categories": [],
+  "fix_suggestions": [],
+  "summary": "brief explanation"
+}
+```
+
+Error categories for structured feedback:
+- pii_leak: Individual student data exposed
+- bad_aggregation: Fewer than 5 individuals per group
+- sql_injection: Dangerous SQL detected
+- impossible_data: Mathematically impossible values
+- missing_data: Response doesn't address the question
+- inconsistent_data: Internally inconsistent data
+
+When validation fails, include specific fix_suggestions that tell the orchestrator exactly what
+to fix and which agent to re-route to. For example:
+- "Remove FIRST_NAME column and aggregate by department instead" → re-route to SQL agent
+- "Data shows 150% completion rate which is impossible — re-query with corrected logic" → re-route to SQL agent
+- "Response doesn't mention enrollment trends the user asked about" → re-route to writer agent"""
 
 # --- Tool ---
 @tool
@@ -103,29 +134,77 @@ def validate_response(user_query: str, response_text: str, sql_query: str = "", 
         data_summary: Optional summary of query result data.
 
     Returns:
-        The formatted context for the agent to validate, including rule-based check results.
+        The formatted context for the agent to validate, including rule-based check results
+        and structured error categorization.
     """
-    # Run quick rule-based PII checks
-    pii_findings = []
-    for pattern in FERPA_PII_PATTERNS:
-        if re.search(pattern, response_text, re.IGNORECASE):
-            pii_findings.append(f"PII pattern matched: {pattern}")
+    import json as _json
 
-    rule_results = "Rule-based PII check: "
-    if pii_findings:
-        rule_results += "FAILED - " + "; ".join(pii_findings)
-    else:
-        rule_results += "PASSED - No obvious PII patterns detected"
+    # Run rule-based PII checks with pattern descriptions
+    pii_findings = []
+    for pattern, description in FERPA_PII_PATTERNS:
+        matches = re.findall(pattern, response_text, re.IGNORECASE)
+        if matches:
+            pii_findings.append({
+                "type": description,
+                "count": len(matches),
+                "category": "pii_leak",
+            })
+
+    # Run SQL safety checks if SQL is provided
+    sql_findings = []
+    if sql_query:
+        sql_upper = sql_query.strip().upper()
+        dangerous_patterns = [
+            ("DROP", "sql_injection"),
+            ("DELETE", "sql_injection"),
+            ("INSERT", "sql_injection"),
+            ("UPDATE", "sql_injection"),
+            ("ALTER", "sql_injection"),
+            ("TRUNCATE", "sql_injection"),
+            ("GRANT", "sql_injection"),
+            ("REVOKE", "sql_injection"),
+        ]
+        for keyword, category in dangerous_patterns:
+            if keyword in sql_upper:
+                sql_findings.append({
+                    "keyword": keyword,
+                    "category": category,
+                    "fix_suggestion": f"Remove {keyword} operation — only SELECT/WITH queries are allowed.",
+                })
+
+    # Build structured validation context
+    rule_check_results = {
+        "pii_check": {
+            "passed": len(pii_findings) == 0,
+            "findings": pii_findings,
+        },
+        "sql_safety_check": {
+            "passed": len(sql_findings) == 0,
+            "findings": sql_findings,
+        },
+        "error_categories": ERROR_CATEGORIES,
+    }
 
     parts = [
         f"User Question: {user_query}",
         f"\nResponse to Validate:\n{response_text}",
-        f"\n{rule_results}",
+        f"\n## Rule-Based Check Results\n```json\n{_json.dumps(rule_check_results, indent=2)}\n```",
     ]
     if sql_query:
         parts.append(f"\nSQL Query:\n{sql_query}")
     if data_summary:
         parts.append(f"\nData Summary:\n{data_summary}")
+
+    parts.append(
+        "\n## Your Validation Task\n"
+        "Evaluate the response and return your assessment as structured JSON with these fields:\n"
+        "- status: 'passed' | 'failed' | 'warning'\n"
+        "- confidence: 0.0-1.0\n"
+        "- blocked: true/false (only true for serious violations)\n"
+        "- categories: list of error category keys from the taxonomy above (if any)\n"
+        "- fix_suggestions: list of specific, actionable fixes for each issue\n"
+        "- summary: brief explanation of the validation result"
+    )
 
     return "\n".join(parts)
 
@@ -135,11 +214,28 @@ model_id = os.environ.get(
     "BEDROCK_MODEL_ID",
     "us.anthropic.claude-sonnet-4-6",
 )
+
+# Bedrock Guardrails — FERPA compliance filter runs before/after LLM inference
+guardrail_id = os.environ.get("BEDROCK_GUARDRAIL_ID", "")
+guardrail_version = os.environ.get("BEDROCK_GUARDRAIL_VERSION", "")
+guardrail_config = None
+if guardrail_id and guardrail_version:
+    guardrail_config = {
+        "guardrailIdentifier": guardrail_id,
+        "guardrailVersion": guardrail_version,
+        "trace": "enabled",
+    }
+    log(f"  Guardrail: {guardrail_id} v{guardrail_version}")
+
 bedrock_model = BedrockModel(
     region_name=os.environ.get("AWS_REGION", "us-east-1"),
     model_id=model_id,
+    additional_model_request_fields={
+        "inferenceConfig": {"temperature": 0.0},
+        **({"amazon-bedrock-guardrailConfig": guardrail_config} if guardrail_config else {}),
+    },
 )
-log(f"  Model: {model_id}")
+log(f"  Model: {model_id} (temperature=0.0)")
 
 strands_agent = Agent(
     name="Illuminate Validator Agent",

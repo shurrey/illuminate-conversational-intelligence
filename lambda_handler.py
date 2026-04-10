@@ -45,6 +45,34 @@ logger = logging.getLogger("API-PROXY")
 
 
 # =============================================================================
+# Post-processing PII filter — runs on EVERY response before returning to user
+# =============================================================================
+
+# Patterns for common PII types (programmatic, not prompt-dependent)
+_PII_PATTERNS = [
+    (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), '[SSN REDACTED]'),                        # SSN with dashes
+    (re.compile(r'\b\d{9}\b'), '[ID REDACTED]'),                                       # SSN without dashes (9 digits)
+    (re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'), '[EMAIL REDACTED]'),  # Email
+    (re.compile(r'\b\d{10}\b'), '[PHONE REDACTED]'),                                   # 10-digit phone
+    (re.compile(r'\b\(\d{3}\)\s*\d{3}-\d{4}\b'), '[PHONE REDACTED]'),                 # Phone (xxx) xxx-xxxx
+    (re.compile(r'\b\d{3}\.\d{3}\.\d{4}\b'), '[PHONE REDACTED]'),                     # Phone xxx.xxx.xxxx
+    (re.compile(r'\b\d{3}-\d{3}-\d{4}\b'), '[PHONE REDACTED]'),                       # Phone xxx-xxx-xxxx
+    (re.compile(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'), '[CARD REDACTED]'),   # Credit card
+]
+
+
+def _scrub_pii(text: str) -> str:
+    """Scrub PII patterns from response text as a last-resort safety net.
+
+    Runs AFTER the LLM generates text, before returning to the user.
+    This catches anything the Bedrock Guardrail or prompt-based approach missed.
+    """
+    for pattern, replacement in _PII_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+# =============================================================================
 # Tool status marker extraction from [TOOL_STATUS:name] markers
 # =============================================================================
 
@@ -52,10 +80,14 @@ _TOOL_STATUS_PATTERN = re.compile(r'\[TOOL_STATUS:(\w+)\]')
 
 # Tool-name → user-friendly status message
 _TOOL_STATUS_MESSAGES = {
+    "plan_query": "Planning approach...",
+    "get_schema_guidance": "Consulting schema expert...",
     "query_database": "Querying Snowflake database...",
+    "check_data_quality": "Checking data quality...",
     "list_objects": "Discovering database tables...",
     "describe_object": "Reading table schema...",
     "run_snowflake_query": "Executing SQL query...",
+    "lookup_verified_query": "Searching verified queries...",
     "analyze_data": "Analyzing results...",
     "write_response": "Preparing response...",
     "validate_response": "Validating for compliance...",
@@ -547,6 +579,10 @@ async def send_message_streaming(message_text: str, context_id: Optional[str] = 
     cleaned_text, chart_artifacts = extract_chart_configs(full_text)
     cleaned_text, sql_artifacts = extract_sql_queries(cleaned_text)
     artifacts = chart_artifacts + sql_artifacts
+
+    # Post-processing PII scrub — last-resort safety net
+    cleaned_text = _scrub_pii(cleaned_text)
+
     if chart_artifacts:
         logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into streaming response")
     if sql_artifacts:
@@ -646,6 +682,10 @@ async def chat(
         cleaned_text, chart_artifacts = extract_chart_configs(text)
         cleaned_text, sql_artifacts = extract_sql_queries(cleaned_text)
         artifacts = chart_artifacts + sql_artifacts
+
+        # Post-processing PII scrub — last-resort safety net
+        cleaned_text = _scrub_pii(cleaned_text)
+
         if chart_artifacts:
             logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into response")
         if sql_artifacts:
