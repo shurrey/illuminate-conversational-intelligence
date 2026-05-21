@@ -1,15 +1,12 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { LambdaProxy } from './lambda-proxy';
+import { ConversationTable } from './conversation-table';
 import { Discovery } from '../base/discovery';
 
 export interface ApiStackProps extends cdk.StackProps {
   environment: string;
-  vpc: ec2.IVpc;
-  securityGroup: ec2.ISecurityGroup;
-  orchestratorArn: string;
   userPoolId: string;
   userPoolClientId: string;
   artifactsBucketName: string;
@@ -25,11 +22,14 @@ export class ApiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
 
+    const conversationTable = new ConversationTable(this, 'ConversationTable', {
+      environment: props.environment,
+    });
+
     const proxy = new LambdaProxy(this, 'LambdaProxy', {
       environment: props.environment,
-      vpc: props.vpc,
-      securityGroup: props.securityGroup,
-      orchestratorArn: props.orchestratorArn,
+      conversationTableArn: conversationTable.table.tableArn,
+      conversationTableName: conversationTable.tableName,
       userPoolId: props.userPoolId,
       userPoolClientId: props.userPoolClientId,
       artifactsBucketName: props.artifactsBucketName,

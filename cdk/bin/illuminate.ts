@@ -3,7 +3,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as fs from 'fs';
 import * as path from 'path';
 import { BaseStack } from '../lib/base';
-import { AgentCoreStack } from '../lib/agentcore';
 import { ApiStack } from '../lib/api';
 // Frontend is deployed separately (its own project/stack)
 // import { FrontendStack } from '../lib/frontend';
@@ -52,30 +51,17 @@ const base = new BaseStack(app, `IlluminateBase-${environment}`, {
 });
 
 // =============================================================================
-// Stack 2: AgentCore (IAM, Gateway, Memory, 5x Agent Runtimes)
-// =============================================================================
-const agentcore = new AgentCoreStack(app, `IlluminateAgentCore-${environment}`, {
-  env,
-  environment,
-  snowflakeSecret: base.snowflakeSecret,
-});
-agentcore.addDependency(base);
-
-// =============================================================================
-// Stack 3: API proxy (Lambda + LWA + Function URL)
+// Stack 2: API (Lambda + Function URL)
 // =============================================================================
 const api = new ApiStack(app, `IlluminateApi-${environment}`, {
   env,
   environment,
-  vpc: base.vpc,
-  securityGroup: base.securityGroup,
-  orchestratorArn: agentcore.orchestratorArn,
   userPoolId: base.userPool.userPoolId,
   userPoolClientId: base.userPoolClient.userPoolClientId,
   artifactsBucketName: base.artifactsBucket.bucketName,
   snowflakeSecretArn: base.snowflakeSecret.secretArn,
 });
-api.addDependency(agentcore);
+api.addDependency(base);
 
 // Frontend is deployed separately — keep code in lib/frontend/ for reference.
 // To include it: uncomment FrontendStack import above and instantiate here.

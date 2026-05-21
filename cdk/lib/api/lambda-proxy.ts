@@ -2,15 +2,13 @@ import { Construct } from 'constructs';
 import * as cdk from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as path from 'path';
 
 export interface LambdaProxyProps {
   environment: string;
-  vpc: ec2.IVpc;
-  securityGroup: ec2.ISecurityGroup;
-  orchestratorArn: string;
+  conversationTableArn: string;
+  conversationTableName: string;
   userPoolId: string;
   userPoolClientId: string;
   artifactsBucketName: string;
@@ -34,21 +32,34 @@ export class LambdaProxy extends Construct {
       roleName: `illuminate-lambda-${props.environment}`,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
       ],
     });
 
-    // AgentCore invocation
+    // Bedrock model invocation (direct, no AgentCore)
     role.addToPolicy(new iam.PolicyStatement({
-      actions: ['bedrock-agentcore:InvokeAgentRuntime'],
+      actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
       resources: [
-        `arn:aws:bedrock-agentcore:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:runtime/illuminate_orchestrator_*`,
+        'arn:aws:bedrock:*::foundation-model/anthropic.claude-*',
+        `arn:aws:bedrock:*:${cdk.Aws.ACCOUNT_ID}:inference-profile/us.anthropic.claude-*`,
       ],
     }));
 
-    // Secrets Manager
+    // Bedrock Converse API
     role.addToPolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
+      actions: ['bedrock:Converse', 'bedrock:ConverseStream'],
+      resources: ['*'],
+    }));
+
+    // DynamoDB conversation memory
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:DeleteItem'],
+      resources: [props.conversationTableArn],
+    }));
+
+    // Secrets Manager (read + write for config endpoint)
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: ['secretsmanager:GetSecretValue', 'secretsmanager:PutSecretValue'],
       resources: [props.snowflakeSecretArn],
     }));
 
@@ -93,27 +104,24 @@ export class LambdaProxy extends Construct {
           command: [
             'bash', '-c', [
               'pip install -q -t /asset-output --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: -r requirements-lambda.txt',
-              'cp lambda_handler.py snowflake_client.py run.sh /asset-output/',
+              'cp lambda_handler.py chat_engine.py conversation_store.py snowflake_client.py run.sh /asset-output/',
+              'cp verified_queries.json /asset-output/ 2>/dev/null || true',
             ].join(' && '),
           ],
         },
       }),
-      vpc: props.vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [props.securityGroup],
       environment: {
         AWS_LAMBDA_EXEC_WRAPPER: '/opt/bootstrap',
         PORT: '8080',
         AWS_LWA_READINESS_CHECK_PATH: '/health',
         AWS_LWA_INVOKE_MODE: 'response_stream',
-        ILLUMINATE_USE_A2A: 'true',
-        ORCHESTRATOR_ARN: props.orchestratorArn,
+        CONVERSATION_TABLE: props.conversationTableName,
+        BEDROCK_MODEL_ID: 'us.anthropic.claude-sonnet-4-6',
         ARTIFACTS_BUCKET: props.artifactsBucketName,
         USER_POOL_ID: props.userPoolId,
         USER_POOL_CLIENT_ID: props.userPoolClientId,
         ALLOWED_ORIGINS: allowedOrigins,
         ACCOUNT_ID: cdk.Aws.ACCOUNT_ID,
-        A2A_TIMEOUT: '300',
         SNOWFLAKE_SECRET_NAME: `illuminate/${props.environment}/snowflake`,
         LOG_LEVEL: isProd ? 'WARN' : 'INFO',
       },

@@ -1,21 +1,12 @@
 """
 Illuminate Conversational Intelligence - API Proxy Lambda
 
-Thin proxy between the frontend and the Orchestrator AgentCore runtime.
-No agent code runs here — all agent logic runs in Bedrock AgentCore runtimes.
-
-Uses Lambda Web Adapter (LWA) to run FastAPI/uvicorn inside Lambda, enabling
-real SSE streaming via RESPONSE_STREAM Function URL invoke mode. LWA proxies
-incoming Lambda invocations to the local uvicorn server and streams bytes back.
-
-Calls the orchestrator via boto3 invoke_agent_runtime (SigV4 auth). Streaming
-requests use accept=text/event-stream to get real-time SSE events — tool calls
-are mapped to user-friendly status messages so the frontend can show progress.
+Thin Lambda handler wrapping FastAPI/uvicorn via Lambda Web Adapter (LWA).
+Uses chat_engine for all LLM orchestration and conversation_store for history.
 
 Request flow:
     Frontend -> Lambda Function URL (RESPONSE_STREAM) -> LWA -> uvicorn/FastAPI
-        -> boto3 invoke_agent_runtime (SigV4) -> Orchestrator AgentCore (A2A)
-        -> SQL, Analyst, Writer, Validator
+        -> chat_engine (Bedrock Converse) -> Snowflake / MCP tools
 """
 import os
 import json
@@ -32,9 +23,6 @@ from pydantic import BaseModel
 # JWT validation
 from jose import jwt, JWTError
 import requests as http_requests
-
-# boto3 for AgentCore SDK calls (SigV4 auth handled automatically)
-import boto3
 
 # Configure logging
 logging.basicConfig(
@@ -73,39 +61,12 @@ def _scrub_pii(text: str) -> str:
 
 
 # =============================================================================
-# Tool status marker extraction from [TOOL_STATUS:name] markers
-# =============================================================================
-
-_TOOL_STATUS_PATTERN = re.compile(r'\[TOOL_STATUS:(\w+)\]')
-
-# Tool-name → user-friendly status message
-_TOOL_STATUS_MESSAGES = {
-    "plan_query": "Planning approach...",
-    "get_schema_guidance": "Consulting schema expert...",
-    "query_database": "Querying Snowflake database...",
-    "check_data_quality": "Checking data quality...",
-    "list_objects": "Discovering database tables...",
-    "describe_object": "Reading table schema...",
-    "run_snowflake_query": "Executing SQL query...",
-    "lookup_verified_query": "Searching verified queries...",
-    "analyze_data": "Analyzing results...",
-    "write_response": "Preparing response...",
-    "validate_response": "Validating for compliance...",
-}
-
-
-def strip_tool_status_markers(text: str) -> str:
-    """Remove [TOOL_STATUS:name] markers and surrounding whitespace from text."""
-    cleaned = _TOOL_STATUS_PATTERN.sub('', text)
-    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-
-
-# =============================================================================
 # Chart extraction from [CHART_CONFIG] text markers
 # =============================================================================
 
 _CHART_PATTERN = re.compile(r'\[CHART_CONFIG\]\s*(.*?)\s*\[/CHART_CONFIG\]', re.DOTALL)
 _SQL_QUERY_PATTERN = re.compile(r'\[SQL_QUERY\]\s*(.*?)\s*\[/SQL_QUERY\]', re.DOTALL)
+_QUERY_PARAMS_PATTERN = re.compile(r'\[QUERY_PARAMS\]\s*(.*?)\s*\[/QUERY_PARAMS\]', re.DOTALL)
 
 
 def extract_chart_configs(text: str) -> tuple[str, list[dict]]:
@@ -156,16 +117,29 @@ def extract_chart_configs(text: str) -> tuple[str, list[dict]]:
 # =============================================================================
 
 def extract_sql_queries(text: str) -> tuple[str, list[dict]]:
-    """Extract [SQL_QUERY]{...}[/SQL_QUERY] blocks from agent text.
+    """Extract [SQL_QUERY] and [QUERY_PARAMS] blocks from agent text.
 
     Returns (cleaned_text, list_of_frontend_sql_artifacts).
+    Each artifact may include a "parameters" array if the query is parameterized.
     """
+    # Extract any [QUERY_PARAMS] blocks first (they follow [SQL_QUERY] blocks)
+    param_blocks = []
+    for match in _QUERY_PARAMS_PATTERN.finditer(text):
+        try:
+            params = json.loads(match.group(1))
+            if isinstance(params, list):
+                param_blocks.append(params)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(f"Failed to parse query params: {e}")
+
     matches = list(_SQL_QUERY_PATTERN.finditer(text))
     if not matches:
-        return text, []
+        # Still clean up any orphaned param blocks
+        cleaned = _QUERY_PARAMS_PATTERN.sub('', text).strip()
+        return cleaned, []
 
     sql_artifacts = []
-    for match in matches:
+    for i, match in enumerate(matches):
         try:
             config = json.loads(match.group(1))
             sql_text = config.get("sql", "")
@@ -178,13 +152,19 @@ def extract_sql_queries(text: str) -> tuple[str, list[dict]]:
                     "title": title,
                     "data": sql_text,
                 }
+                # Attach parameters if available (params follow their SQL block in order)
+                if i < len(param_blocks):
+                    sql_artifact["parameters"] = param_blocks[i]
+                    logger.info(f"Extracted parameterized SQL query: '{title}' with {len(param_blocks[i])} param(s)")
+                else:
+                    logger.info(f"Extracted SQL query: '{title}'")
                 sql_artifacts.append(sql_artifact)
-                logger.info(f"Extracted SQL query: '{title}'")
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(f"Failed to parse SQL query config: {e}")
 
-    # Remove markers from text and clean up whitespace
+    # Remove both marker types from text and clean up whitespace
     cleaned = _SQL_QUERY_PATTERN.sub('', text).strip()
+    cleaned = _QUERY_PARAMS_PATTERN.sub('', cleaned).strip()
     cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     return cleaned, sql_artifacts
 
@@ -193,7 +173,6 @@ def extract_sql_queries(text: str) -> tuple[str, list[dict]]:
 # Configuration from environment variables
 # =============================================================================
 
-ORCHESTRATOR_ARN = os.environ.get("ORCHESTRATOR_ARN", "")
 USER_POOL_ID = os.environ.get("USER_POOL_ID", "")
 USER_POOL_CLIENT_ID = os.environ.get("USER_POOL_CLIENT_ID", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
@@ -208,9 +187,6 @@ DICTIONARY_CACHE_TTL = 3600  # 1 hour
 
 # Input validation for Snowflake identifiers
 _SAFE_IDENTIFIER = re.compile(r'^[A-Za-z0-9_]+$')
-
-# A2A protocol timeout (seconds) - agent queries can be slow
-A2A_TIMEOUT = int(os.environ.get("A2A_TIMEOUT", "300"))
 
 
 # =============================================================================
@@ -342,260 +318,81 @@ class HealthResponse(BaseModel):
 
 
 # =============================================================================
-# A2A Client for AgentCore Communication (boto3 / SigV4)
+# Chat Engine Wrappers
 # =============================================================================
 
-# Module-level boto3 client — created once per Lambda cold start.
-# SigV4 auth is handled automatically by the Lambda execution role.
-from botocore.config import Config as BotoConfig
-
-_agentcore_boto3 = boto3.client(
-    "bedrock-agentcore",
-    region_name=AWS_REGION,
-    config=BotoConfig(
-        read_timeout=A2A_TIMEOUT,
-        connect_timeout=10,
-        retries={"max_attempts": 1},
-    ),
-)
-logger.info(f"boto3 bedrock-agentcore client created (timeout={A2A_TIMEOUT}s)")
-
-
-
-def _build_a2a_request(method: str, message_text: str, context_id: Optional[str] = None) -> dict:
-    """Build a JSON-RPC A2A request payload."""
-    return {
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": {
-            "message": {
-                "role": "user",
-                "parts": [{"kind": "text", "text": message_text}],
-                "messageId": str(uuid.uuid4()),
-                "contextId": context_id or str(uuid.uuid4()),
-            }
-        },
-        "id": str(uuid.uuid4()),
-    }
-
-
-def _invoke_orchestrator_sync(message_text: str, context_id: Optional[str] = None) -> dict:
-    """Invoke orchestrator via boto3 (synchronous, JSON response)."""
-    payload = _build_a2a_request("message/send", message_text, context_id)
-    invoke_kwargs = dict(
-        agentRuntimeArn=ORCHESTRATOR_ARN,
-        contentType="application/json",
-        accept="application/json",
-        payload=json.dumps(payload).encode(),
-    )
-    # Pass session ID so AgentCore routes to the correct STM memory session
-    if context_id:
-        invoke_kwargs["runtimeSessionId"] = context_id
-    response = _agentcore_boto3.invoke_agent_runtime(**invoke_kwargs)
-    body = json.loads(response["response"].read().decode())
-    logger.info(f"AgentCore sync response keys: {list(body.keys())}")
-    if "error" in body:
-        raise Exception(body["error"].get("message", "AgentCore error"))
-    return body.get("result", body)
-
-
-def _invoke_orchestrator_stream(message_text: str, context_id: Optional[str] = None):
-    """Invoke orchestrator via boto3 with SSE streaming. Yields raw SSE data strings."""
-    payload = _build_a2a_request("message/stream", message_text, context_id)
-    invoke_kwargs = dict(
-        agentRuntimeArn=ORCHESTRATOR_ARN,
-        contentType="application/json",
-        accept="text/event-stream",
-        payload=json.dumps(payload).encode(),
-    )
-    # Pass session ID so AgentCore routes to the correct STM memory session
-    if context_id:
-        invoke_kwargs["runtimeSessionId"] = context_id
-    response = _agentcore_boto3.invoke_agent_runtime(**invoke_kwargs)
-
-    # The response body is a botocore StreamingBody — read SSE lines incrementally
-    stream = response["response"]
-    buffer = ""
-    while True:
-        chunk = stream.read(4096)
-        if not chunk:
-            break
-        buffer += chunk.decode("utf-8", errors="replace")
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            line = line.strip()
-            if line.startswith("data:"):
-                yield line[5:].strip()
-
-
-def _extract_text_from_result(result: dict) -> str:
-    """Extract text content from an A2A result dict."""
-    text = ""
-    for artifact in result.get("artifacts", []):
-        for part in artifact.get("parts", []):
-            if part.get("kind") == "text" and part.get("text"):
-                text += part["text"]
-    if not text:
-        for msg in reversed(result.get("history", [])):
-            if msg.get("role") == "agent":
-                for part in msg.get("parts", []):
-                    if part.get("kind") == "text":
-                        text += part.get("text", "")
-                if text:
-                    break
-    return text
-
-
 async def send_message(message_text: str, context_id: Optional[str] = None) -> dict:
-    """Send a message to the orchestrator (non-streaming) via boto3."""
+    """Send a message via chat_engine (non-streaming)."""
     import asyncio
+    from chat_engine import send_message as engine_send
+    from conversation_store import load_history, save_turn
+
+    history = load_history(context_id) if context_id else []
+    bedrock_history = []
+    for msg in history:
+        bedrock_history.append({
+            "role": msg["role"],
+            "content": [{"text": msg["content"]}],
+        })
+
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(
-        None, lambda: _invoke_orchestrator_sync(message_text, context_id)
+    response_text, _ = await loop.run_in_executor(
+        None, lambda: engine_send(message_text, bedrock_history)
     )
+
+    if context_id:
+        save_turn(context_id, message_text, response_text)
+
+    return {"text": response_text, "contextId": context_id}
 
 
 async def send_message_streaming(message_text: str, context_id: Optional[str] = None):
-    """Stream A2A events from the orchestrator via boto3, yielding frontend events.
+    """Stream a response via chat_engine, yielding frontend events."""
+    from chat_engine import send_message_streaming as engine_stream
+    from conversation_store import load_history, save_turn
 
-    Yields events in the format expected by the frontend:
-    - {type: "status", message: "..."}
-    - {type: "complete", data: {text, artifacts, contextId}}
-    - {type: "error", message: "..."}
-    """
-    import asyncio
-    import queue
+    yield {"type": "status", "message": "Processing your question..."}
 
-    yield {"type": "status", "message": "Routing to orchestrator..."}
+    history = load_history(context_id) if context_id else []
+    bedrock_history = []
+    for msg in history:
+        bedrock_history.append({
+            "role": msg["role"],
+            "content": [{"text": msg["content"]}],
+        })
 
     full_text = ""
-    streaming_buffer = ""  # accumulates chunks to detect multi-token markers
-    result_context_id = None
-    got_result = False
-    loop = asyncio.get_event_loop()
-
     try:
-        # Stream SSE events from boto3 in a background thread via queue
-        event_queue: queue.Queue = queue.Queue()
+        async for event in engine_stream(message_text, bedrock_history):
+            if event["type"] == "status":
+                yield event
+            elif event["type"] == "raw_complete":
+                full_text = event["text"]
+                if context_id:
+                    save_turn(context_id, message_text, full_text)
 
-        def _stream_to_queue():
-            try:
-                for data_str in _invoke_orchestrator_stream(message_text, context_id):
-                    event_queue.put(data_str)
-            except Exception as e:
-                event_queue.put(json.dumps({"error": {"message": str(e)}}))
-            finally:
-                event_queue.put(None)  # sentinel
-
-        loop.run_in_executor(None, _stream_to_queue)
-
-        while True:
-            try:
-                data_str = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: event_queue.get(timeout=0.5)),
-                    timeout=1.0,
-                )
-            except (asyncio.TimeoutError, Exception):
-                continue
-
-            if data_str is None:
-                break
-
-            try:
-                event = json.loads(data_str)
-            except json.JSONDecodeError:
-                continue
-
-            result = event.get("result", {})
-            if not isinstance(result, dict):
-                continue
-
-            kind = result.get("kind", "")
-            result_context_id = result.get("contextId") or result_context_id
-
-            if kind == "status-update":
-                status = result.get("status", {})
-                state = status.get("state", "")
-
-                if state == "working":
-                    # Token-by-token text chunks from the orchestrator
-                    msg = status.get("message", {})
-                    if isinstance(msg, dict):
-                        for part in msg.get("parts", []):
-                            chunk = part.get("text", "")
-                            if chunk:
-                                # Accumulate text to detect multi-token markers
-                                streaming_buffer += chunk
-                                # Check for [TOOL_STATUS:name] markers
-                                match = _TOOL_STATUS_PATTERN.search(streaming_buffer)
-                                if match:
-                                    tool_name = match.group(1)
-                                    friendly = _TOOL_STATUS_MESSAGES.get(
-                                        tool_name, f"Running {tool_name}..."
-                                    )
-                                    yield {"type": "status", "message": friendly}
-                                    # Clear the matched portion from buffer
-                                    streaming_buffer = streaming_buffer[match.end():]
-
-                elif state in ("completed", "failed"):
-                    got_result = True
-
-            elif kind == "artifact-update":
-                # Full response text arrives in artifact-update event
-                artifact = result.get("artifact", {})
-                for part in artifact.get("parts", []):
-                    if part.get("kind") == "text" and part.get("text"):
-                        full_text += part["text"]
-
-            # Check for JSON-RPC error
-            if "error" in event:
-                error_msg = event["error"]
-                if isinstance(error_msg, dict):
-                    error_msg = error_msg.get("message", "AgentCore error")
-                yield {"type": "error", "message": str(error_msg)}
-                return
-
-    except Exception as e:
-        logger.error(f"Streaming failed, falling back to synchronous: {e}")
-        yield {"type": "status", "message": "Processing request..."}
-        try:
-            result = await loop.run_in_executor(
-                None, lambda: _invoke_orchestrator_sync(message_text, context_id)
-            )
-            if isinstance(result, dict):
-                full_text = _extract_text_from_result(result)
-                result_context_id = result.get("contextId")
-                got_result = True
-        except Exception as fallback_err:
-            yield {"type": "error", "message": str(fallback_err)}
+        if not full_text:
+            yield {"type": "error", "message": "Empty response"}
             return
 
-    if not full_text and not got_result:
-        yield {"type": "error", "message": "Empty response from AgentCore"}
-        return
+        # Process markers
+        cleaned_text, chart_artifacts = extract_chart_configs(full_text)
+        cleaned_text, sql_artifacts = extract_sql_queries(cleaned_text)
+        artifacts = chart_artifacts + sql_artifacts
+        cleaned_text = _scrub_pii(cleaned_text)
 
-    # Strip [TOOL_STATUS:...] markers, then extract charts and SQL queries
-    full_text = strip_tool_status_markers(full_text)
-    cleaned_text, chart_artifacts = extract_chart_configs(full_text)
-    cleaned_text, sql_artifacts = extract_sql_queries(cleaned_text)
-    artifacts = chart_artifacts + sql_artifacts
+        yield {
+            "type": "complete",
+            "data": {
+                "text": cleaned_text,
+                "artifacts": artifacts,
+                "contextId": context_id,
+            },
+        }
 
-    # Post-processing PII scrub — last-resort safety net
-    cleaned_text = _scrub_pii(cleaned_text)
-
-    if chart_artifacts:
-        logger.info(f"Injected {len(chart_artifacts)} chart artifact(s) into streaming response")
-    if sql_artifacts:
-        logger.info(f"Injected {len(sql_artifacts)} SQL artifact(s) into streaming response")
-
-    yield {
-        "type": "complete",
-        "data": {
-            "text": cleaned_text,
-            "artifacts": artifacts,
-            "contextId": result_context_id,
-        },
-    }
+    except Exception as e:
+        logger.error(f"Chat engine error: {e}")
+        yield {"type": "error", "message": str(e)}
 
 
 # =============================================================================
@@ -603,9 +400,9 @@ async def send_message_streaming(message_text: str, context_id: Optional[str] = 
 # =============================================================================
 
 app = FastAPI(
-    title="Illuminate Conversational Intelligence - API Proxy",
-    description="Thin proxy Lambda forwarding requests to AgentCore Orchestrator",
-    version="0.2.0"
+    title="Illuminate Conversational Intelligence - API",
+    description="FastAPI handler using chat_engine for LLM orchestration",
+    version="0.3.0"
 )
 
 # CORS middleware
@@ -618,15 +415,6 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 
-def _ensure_orchestrator_configured():
-    """Fail fast if ORCHESTRATOR_ARN is not set."""
-    if not ORCHESTRATOR_ARN:
-        raise RuntimeError(
-            "ORCHESTRATOR_ARN environment variable is not set. "
-            "Cannot forward requests to AgentCore."
-        )
-
-
 # Track cancelled request IDs
 _cancelled_requests: set[str] = set()
 
@@ -636,8 +424,8 @@ async def health_check():
     """Health check endpoint."""
     return HealthResponse(
         status="healthy",
-        version="0.2.0",
-        mode="proxy"
+        version="0.3.0",
+        mode="chat_engine"
     )
 
 
@@ -646,12 +434,7 @@ async def chat(
     request: ChatRequest,
     authorization: str = Header(...)
 ):
-    """
-    Send a message to the Orchestrator AgentCore runtime.
-
-    The request is forwarded via A2A protocol to the Orchestrator endpoint
-    running in Bedrock AgentCore. All agent coordination happens there.
-    """
+    """Send a message via chat_engine (non-streaming)."""
     user = _get_user_from_token(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -667,23 +450,16 @@ async def chat(
     logger.info(f"Chat request: message='{message_text[:100]}...', context_id={context_id}")
 
     try:
-        _ensure_orchestrator_configured()
-
         result = await send_message(
             message_text=message_text,
             context_id=context_id,
         )
 
-        # Extract text from A2A response format and strip status markers
-        text = _extract_text_from_result(result) if isinstance(result, dict) else ""
-        text = strip_tool_status_markers(text)
+        text = result.get("text", "")
 
-        # Extract chart markers and SQL queries from text
         cleaned_text, chart_artifacts = extract_chart_configs(text)
         cleaned_text, sql_artifacts = extract_sql_queries(cleaned_text)
         artifacts = chart_artifacts + sql_artifacts
-
-        # Post-processing PII scrub — last-resort safety net
         cleaned_text = _scrub_pii(cleaned_text)
 
         if chart_artifacts:
@@ -694,12 +470,11 @@ async def chat(
         return ChatResponse(
             text=cleaned_text,
             artifacts=artifacts,
-            context_id=result.get("contextId", result.get("context_id", context_id)) if isinstance(result, dict) else context_id,
-            sources=result.get("sources") if isinstance(result, dict) else None,
+            context_id=result.get("contextId", context_id),
         )
 
     except Exception as e:
-        logger.error(f"Error forwarding to AgentCore: {e}")
+        logger.error(f"Chat engine error: {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
@@ -731,10 +506,8 @@ async def chat_stream(
     )
 
     async def event_generator():
-        """Relay SSE events from AgentCore to the frontend."""
+        """Relay SSE events from chat_engine to the frontend."""
         try:
-            _ensure_orchestrator_configured()
-
             async for event in send_message_streaming(
                 message_text=message_text,
                 context_id=context_id,
@@ -791,20 +564,15 @@ async def get_conversation(
     context_id: str,
     authorization: str = Header(...)
 ):
-    """
-    Get conversation history by context ID.
-
-    In proxy mode, conversation history is managed by AgentCore's memory
-    system. This endpoint queries AgentCore for the conversation.
-    """
+    """Get conversation history by context ID."""
     user = _get_user_from_token(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    # AgentCore manages conversation memory via STM
-    # For now, return empty - conversation state is in AgentCore memory
     logger.info(f"Conversation history requested for context: {context_id}")
-    return {"messages": []}
+    from conversation_store import load_history
+    history = load_history(context_id)
+    return {"messages": history}
 
 
 @app.delete("/api/conversations/{context_id}")
@@ -818,6 +586,8 @@ async def clear_conversation(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     logger.info(f"Clear conversation requested for context: {context_id}")
+    from conversation_store import clear_history
+    clear_history(context_id)
     return {"success": True}
 
 
@@ -930,8 +700,9 @@ async def dictionary_preview(
 # =============================================================================
 
 class DashboardQueryRequest(BaseModel):
-    """Request body for dashboard SQL queries."""
+    """Request body for dashboard SQL queries. Supports optional bind parameters."""
     sql: str
+    params: Optional[dict] = None
 
 
 @app.post("/api/v1/dashboard/query")
@@ -941,8 +712,9 @@ async def dashboard_query(
 ):
     """Execute a read-only SQL query against Snowflake for dashboard widgets.
 
-    Only SELECT/WITH statements are allowed. Returns columns + rows on success,
-    or an error message on failure.
+    Only SELECT/WITH statements are allowed. Supports Snowflake bind variables
+    via the optional `params` dict (e.g., {"term_name": "Fall 2024"}).
+    Returns columns + rows on success, or an error message on failure.
     """
     user = _get_user_from_token(authorization)
     if not user:
@@ -956,7 +728,9 @@ async def dashboard_query(
         from snowflake_client import query_sql
 
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, lambda: query_sql(request.sql))
+        result = await loop.run_in_executor(
+            None, lambda: query_sql(request.sql, params=request.params)
+        )
         logger.info(f"Dashboard query returned {len(result['rows'])} rows")
         return result
     except ValueError as e:
