@@ -16,6 +16,11 @@ from concurrent.futures import ThreadPoolExecutor
 import boto3
 
 import snowflake_client
+from semantic_layer.tool import (
+    TOOL_SPEC as QUERY_METRIC_CATALOG_TOOL,
+    format_catalog_for_prompt,
+    query_metric_catalog,
+)
 
 logger = logging.getLogger("API-PROXY")
 
@@ -178,6 +183,20 @@ except Exception as _dict_exc:
 
 _database = _resolve_database()
 
+# Load the canonical metric catalog summary for the system prompt. Failure here
+# is non-fatal — the agent falls back to freehand SQL via execute_sql.
+try:
+    _metric_catalog_summary = format_catalog_for_prompt()
+    logger.info(
+        "Canonical metric catalog loaded (%d chars)",
+        len(_metric_catalog_summary),
+    )
+except Exception as _cat_exc:
+    logger.error("Failed to load canonical metric catalog: %s", _cat_exc)
+    _metric_catalog_summary = (
+        "(Canonical metric catalog unavailable — use execute_sql for all queries.)"
+    )
+
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
@@ -191,6 +210,14 @@ SYSTEM_PROMPT = f"""You are Illuminate, an AI assistant for educational data ana
 
 ## Schema Reference
 {_compiled_schema}
+
+## Canonical Metric Catalog
+
+The following metrics are pre-vetted by Blackboard's data product team. When the user's question matches one of these intents, **prefer calling the `query_metric_catalog` tool** over generating freehand SQL with `execute_sql`. The catalog tool returns aggregated results with full provenance (which definition was used, who owns it) and uses a SQL safety guard that only permits SELECT/CTE statements against the canonical CDM tables.
+
+{_metric_catalog_summary}
+
+Use `execute_sql` only when no metric above answers the question, or when the user explicitly asks to see raw data not covered by a metric.
 
 ## SQL Query Guidelines
 - Always use fully-qualified table names: `{_database}.CDM_LMS.COURSE_MAIN`
@@ -250,6 +277,7 @@ Place this block before your analysis so users can review and trust the query.
 # ---------------------------------------------------------------------------
 
 TOOLS = [
+    QUERY_METRIC_CATALOG_TOOL,
     {
         "name": "execute_sql",
         "description": (
@@ -294,6 +322,17 @@ def _dispatch_tool(tool_name: str, tool_input: dict) -> str:
             logger.warning(f"SQL error: {result['error']}")
         else:
             logger.info(f"SQL success: {len(result.get('rows', []))} rows")
+        return json.dumps(result, default=str)
+    if tool_name == "query_metric_catalog":
+        result = query_metric_catalog(tool_input, database=_database)
+        if "error" in result:
+            logger.warning(f"query_metric_catalog error: {result['error']}")
+        else:
+            logger.info(
+                "query_metric_catalog success: %s (%d rows)",
+                result.get("metric_used", {}).get("id"),
+                result.get("row_count", 0),
+            )
         return json.dumps(result, default=str)
     return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
