@@ -27,7 +27,11 @@ from .engine import SqlSafetyError, compile_sql, load_canonical, resolve
 logger = logging.getLogger("API-PROXY")
 
 
-def query_metric_catalog(input: dict[str, Any], database: str) -> dict[str, Any]:
+def query_metric_catalog(
+    input: dict[str, Any],
+    database: str,
+    tenant_id: str | None = None,
+) -> dict[str, Any]:
     """Run a canonical metric and return JSON-serializable result.
 
     Args:
@@ -36,6 +40,9 @@ def query_metric_catalog(input: dict[str, Any], database: str) -> dict[str, Any]
             dimension ids). All ids must exist on the resolved merged metric.
         database: Snowflake database name, injected into the metric's
             Jinja-templated SQL as `{{ database }}`.
+        tenant_id: Cognito custom:tenant_id claim. When provided, the tenant's
+            overlay (if any) is applied to the canonical metric before SQL
+            compilation. None means "canonical only".
     """
     metric_id = input.get("metric_id", "").strip()
     if not metric_id:
@@ -51,9 +58,17 @@ def query_metric_catalog(input: dict[str, Any], database: str) -> dict[str, Any]
             "available_metrics": sorted(canonical.metrics.keys()),
         }
 
-    # No tenant overlays in MVP. When Cognito tenant claim wiring lands,
-    # resolve from a tenant_id propagated through the request context.
+    # Load tenant overlay from DynamoDB if a tenant_id was provided.
+    # Lazy-imported so tests can stub tenant_store without boto3 in deps.
     tenant = None
+    if tenant_id:
+        try:
+            import tenant_store
+            tenant = tenant_store.load_tenant(tenant_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "tenant_store unavailable, falling back to canonical: %s", e
+            )
     merged = resolve(canonical, tenant, metric_id)
 
     filter_ids = input.get("filters") or []

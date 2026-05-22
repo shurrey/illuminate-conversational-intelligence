@@ -311,7 +311,9 @@ TOOLS = [
 # ---------------------------------------------------------------------------
 
 
-def _dispatch_tool(tool_name: str, tool_input: dict) -> str:
+def _dispatch_tool(
+    tool_name: str, tool_input: dict, tenant_id: str | None = None
+) -> str:
     """Execute a tool call and return the result as a JSON string."""
     if tool_name == "execute_sql":
         sql = tool_input.get("sql", "")
@@ -324,13 +326,17 @@ def _dispatch_tool(tool_name: str, tool_input: dict) -> str:
             logger.info(f"SQL success: {len(result.get('rows', []))} rows")
         return json.dumps(result, default=str)
     if tool_name == "query_metric_catalog":
-        result = query_metric_catalog(tool_input, database=_database)
+        result = query_metric_catalog(
+            tool_input, database=_database, tenant_id=tenant_id
+        )
         if "error" in result:
             logger.warning(f"query_metric_catalog error: {result['error']}")
         else:
             logger.info(
-                "query_metric_catalog success: %s (%d rows)",
+                "query_metric_catalog success: %s tenant=%s applied=%s (%d rows)",
                 result.get("metric_used", {}).get("id"),
+                tenant_id or "canonical",
+                result.get("metric_used", {}).get("applied_definition"),
                 result.get("row_count", 0),
             )
         return json.dumps(result, default=str)
@@ -345,12 +351,18 @@ _MAX_ROUNDS = 5
 _INFERENCE_CONFIG = {"temperature": 0.0, "maxTokens": 4096}
 
 
-def send_message(user_message: str, history: list) -> tuple[str, list]:
+def send_message(
+    user_message: str,
+    history: list,
+    tenant_id: str | None = None,
+) -> tuple[str, list]:
     """Send a user message and return (response_text, updated_messages_list).
 
     Args:
         user_message: The user's text input.
         history: Existing conversation as a list of Bedrock Converse messages.
+        tenant_id: Cognito custom:tenant_id of the requesting user. Threads
+            through to query_metric_catalog so the tenant's overlay applies.
 
     Returns:
         Tuple of (response_text, updated_messages_list).
@@ -393,7 +405,9 @@ def send_message(user_message: str, history: list) -> tuple[str, list]:
         for block in tool_uses:
             tool_use = block["toolUse"]
             result_content = _dispatch_tool(
-                tool_use["name"], tool_use.get("input", {})
+                tool_use["name"],
+                tool_use.get("input", {}),
+                tenant_id=tenant_id,
             )
             tool_results.append(
                 {
@@ -421,12 +435,19 @@ def send_message(user_message: str, history: list) -> tuple[str, list]:
 # ---------------------------------------------------------------------------
 
 
-async def send_message_streaming(user_message: str, history: list):
+async def send_message_streaming(
+    user_message: str,
+    history: list,
+    tenant_id: str | None = None,
+):
     """Async generator yielding status and completion events.
 
     Yields dicts of the form:
         {"type": "status", "message": "..."}
         {"type": "raw_complete", "text": "...", "messages": [...]}
+
+    `tenant_id` threads through to the metric-catalog tool so the tenant's
+    overlay applies when matching a canonical metric.
     """
     loop = asyncio.get_event_loop()
     messages = list(history)
@@ -473,7 +494,7 @@ async def send_message_streaming(user_message: str, history: list):
             tool_use = block["toolUse"]
 
             def _dispatch_sync(name=tool_use["name"], inp=tool_use.get("input", {})):
-                return _dispatch_tool(name, inp)
+                return _dispatch_tool(name, inp, tenant_id=tenant_id)
 
             result_content = await loop.run_in_executor(None, _dispatch_sync)
             tool_results.append(

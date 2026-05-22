@@ -9,6 +9,8 @@ export interface LambdaProxyProps {
   environment: string;
   conversationTableArn: string;
   conversationTableName: string;
+  overlayTableArn: string;
+  overlayTableName: string;
   userPoolId: string;
   userPoolClientId: string;
   artifactsBucketName: string;
@@ -55,6 +57,17 @@ export class LambdaProxy extends Construct {
     role.addToPolicy(new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:DeleteItem'],
       resources: [props.conversationTableArn],
+    }));
+
+    // DynamoDB per-tenant overlays (read for query path, read+write for admin)
+    role.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:DeleteItem',
+        'dynamodb:Query',
+      ],
+      resources: [props.overlayTableArn],
     }));
 
     // Secrets Manager (read + write for config endpoint)
@@ -104,7 +117,7 @@ export class LambdaProxy extends Construct {
           command: [
             'bash', '-c', [
               'pip install -q -t /asset-output --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: -r requirements-lambda.txt',
-              'cp lambda_handler.py chat_engine.py conversation_store.py snowflake_client.py run.sh /asset-output/',
+              'cp lambda_handler.py chat_engine.py conversation_store.py snowflake_client.py tenant_store.py run.sh /asset-output/',
               'cp verified_queries.json /asset-output/ 2>/dev/null || true',
               // Semantic layer: ship the package + canonical metric YAML
               'cp -r semantic_layer /asset-output/',
@@ -119,6 +132,7 @@ export class LambdaProxy extends Construct {
         AWS_LWA_READINESS_CHECK_PATH: '/health',
         AWS_LWA_INVOKE_MODE: 'response_stream',
         CONVERSATION_TABLE: props.conversationTableName,
+        OVERLAY_TABLE: props.overlayTableName,
         BEDROCK_MODEL_ID: 'us.anthropic.claude-sonnet-4-6',
         ARTIFACTS_BUCKET: props.artifactsBucketName,
         USER_POOL_ID: props.userPoolId,
