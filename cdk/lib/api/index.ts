@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { LambdaProxy } from './lambda-proxy';
 import { ConversationTable } from './conversation-table';
+import { OverlayTable } from './overlay-table';
 import { Discovery } from '../base/discovery';
 
 export interface ApiStackProps extends cdk.StackProps {
@@ -26,10 +27,16 @@ export class ApiStack extends cdk.Stack {
       environment: props.environment,
     });
 
+    const overlayTable = new OverlayTable(this, 'OverlayTable', {
+      environment: props.environment,
+    });
+
     const proxy = new LambdaProxy(this, 'LambdaProxy', {
       environment: props.environment,
       conversationTableArn: conversationTable.table.tableArn,
       conversationTableName: conversationTable.tableName,
+      overlayTableArn: overlayTable.table.tableArn,
+      overlayTableName: overlayTable.tableName,
       userPoolId: props.userPoolId,
       userPoolClientId: props.userPoolClientId,
       artifactsBucketName: props.artifactsBucketName,

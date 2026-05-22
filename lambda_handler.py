@@ -260,6 +260,19 @@ def _get_user_from_token(authorization: Optional[str]) -> Optional[dict]:
     return _validate_token(parts[1])
 
 
+def _tenant_id_from_user(user: Optional[dict]) -> Optional[str]:
+    """Return the user's tenant_id Cognito claim, if present.
+
+    Looks for `custom:tenant_id` (only in ID tokens). Returns None for
+    access tokens or users without the attribute — caller falls back to
+    canonical-only behavior.
+    """
+    if not user:
+        return None
+    value = user.get("custom:tenant_id")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 # =============================================================================
 # Request/Response Models
 # =============================================================================
@@ -321,7 +334,11 @@ class HealthResponse(BaseModel):
 # Chat Engine Wrappers
 # =============================================================================
 
-async def send_message(message_text: str, context_id: Optional[str] = None) -> dict:
+async def send_message(
+    message_text: str,
+    context_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+) -> dict:
     """Send a message via chat_engine (non-streaming)."""
     import asyncio
     from chat_engine import send_message as engine_send
@@ -337,7 +354,7 @@ async def send_message(message_text: str, context_id: Optional[str] = None) -> d
 
     loop = asyncio.get_event_loop()
     response_text, _ = await loop.run_in_executor(
-        None, lambda: engine_send(message_text, bedrock_history)
+        None, lambda: engine_send(message_text, bedrock_history, tenant_id=tenant_id)
     )
 
     if context_id:
@@ -346,7 +363,11 @@ async def send_message(message_text: str, context_id: Optional[str] = None) -> d
     return {"text": response_text, "contextId": context_id}
 
 
-async def send_message_streaming(message_text: str, context_id: Optional[str] = None):
+async def send_message_streaming(
+    message_text: str,
+    context_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+):
     """Stream a response via chat_engine, yielding frontend events."""
     from chat_engine import send_message_streaming as engine_stream
     from conversation_store import load_history, save_turn
@@ -363,7 +384,7 @@ async def send_message_streaming(message_text: str, context_id: Optional[str] = 
 
     full_text = ""
     try:
-        async for event in engine_stream(message_text, bedrock_history):
+        async for event in engine_stream(message_text, bedrock_history, tenant_id=tenant_id):
             if event["type"] == "status":
                 yield event
             elif event["type"] == "raw_complete":
@@ -453,6 +474,7 @@ async def chat(
         result = await send_message(
             message_text=message_text,
             context_id=context_id,
+            tenant_id=_tenant_id_from_user(user),
         )
 
         text = result.get("text", "")
@@ -511,6 +533,7 @@ async def chat_stream(
             async for event in send_message_streaming(
                 message_text=message_text,
                 context_id=context_id,
+                tenant_id=_tenant_id_from_user(user),
             ):
                 # Check if request was cancelled
                 if request_id and request_id in _cancelled_requests:
@@ -784,9 +807,18 @@ async def dashboard_metric(
             "available_metrics": sorted(canonical.metrics.keys()),
         }
 
-    # No tenant overlays yet — Step 4 will wire Cognito tenant claims through.
+    # Load this user's tenant overlay (if any) and resolve the merged metric.
+    tenant_id = _tenant_id_from_user(user)
+    tenant = None
+    if tenant_id:
+        try:
+            import tenant_store
+            tenant = tenant_store.load_tenant(tenant_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to load tenant %s: %s", tenant_id, e)
+
     try:
-        merged = resolve(canonical, None, request.metric_id)
+        merged = resolve(canonical, tenant, request.metric_id)
         # Resolve the database from chat_engine (already computed at import).
         from chat_engine import _database
         sql = compile_sql(
@@ -813,6 +845,214 @@ async def dashboard_metric(
     except Exception as e:
         logger.error(f"Dashboard metric {request.metric_id} failed: {e}")
         return {"error": str(e), "sql_attempted": sql}
+
+
+# =============================================================================
+# Admin: Overlay management
+# =============================================================================
+# Customer-facing endpoints for managing this tenant's metric overlays. The
+# tenant_id is taken from the user's Cognito custom:tenant_id claim — users
+# can only see/edit their own tenant's overlays.
+
+class OverlayPutRequest(BaseModel):
+    measure_sql: str
+    diff_description: str = ""
+    owner: str = ""
+    last_reviewed: Optional[str] = None  # ISO date; defaults to today server-side
+
+
+def _require_tenant(user: Optional[dict]) -> str:
+    """Extract tenant_id or raise 403 — admin endpoints require it."""
+    tid = _tenant_id_from_user(user)
+    if not tid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "No tenant_id on this token. The frontend must send the ID token "
+                "(not the access token) to admin endpoints."
+            ),
+        )
+    return tid
+
+
+@app.get("/api/v1/admin/metrics")
+async def admin_list_metrics(authorization: str = Header(...)) -> dict:
+    """List all canonical metrics + this tenant's current overlay state.
+
+    Each entry: id, display_name, description, owner (canonical), entity,
+    canonical_sql, and either `overlay` (the tenant's override) or
+    `overlay: None`. This is the data the admin UI's metric list renders.
+    """
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    tenant_id = _require_tenant(user)
+
+    from semantic_layer.engine import load_canonical
+    import tenant_store
+
+    canonical = load_canonical()
+    tenant = tenant_store.load_tenant(tenant_id)
+    out = []
+    for mid, m in canonical.metrics.items():
+        overlay = tenant.overlays.get(mid)
+        out.append({
+            "id": m.id,
+            "display_name": m.display_name,
+            "description": m.description.strip(),
+            "owner": m.owner,
+            "entity": m.entity,
+            "canonical_sql": m.measure_sql,
+            "synonyms": m.synonyms,
+            "overlay": (
+                {
+                    "owner": overlay.owner,
+                    "last_reviewed": overlay.last_reviewed.isoformat(),
+                    "diff_description": overlay.diff_description,
+                    "measure_sql": overlay.measure_sql,
+                }
+                if overlay
+                else None
+            ),
+        })
+    return {"tenant_id": tenant_id, "metrics": out}
+
+
+@app.get("/api/v1/admin/overlay/{metric_id}")
+async def admin_get_overlay(
+    metric_id: str,
+    authorization: str = Header(...),
+) -> dict:
+    """Return the current overlay for one metric, or null if none exists."""
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    tenant_id = _require_tenant(user)
+
+    from semantic_layer.engine import load_canonical
+    import tenant_store
+
+    canonical = load_canonical()
+    if metric_id not in canonical.metrics:
+        raise HTTPException(status_code=404, detail=f"Unknown metric: {metric_id}")
+    overlay = tenant_store.get_overlay(tenant_id, metric_id)
+    if overlay is None:
+        return {"tenant_id": tenant_id, "metric_id": metric_id, "overlay": None}
+    return {
+        "tenant_id": tenant_id,
+        "metric_id": metric_id,
+        "overlay": {
+            "owner": overlay.owner,
+            "last_reviewed": overlay.last_reviewed.isoformat(),
+            "diff_description": overlay.diff_description,
+            "measure_sql": overlay.measure_sql,
+        },
+    }
+
+
+@app.put("/api/v1/admin/overlay/{metric_id}")
+async def admin_put_overlay(
+    metric_id: str,
+    request: OverlayPutRequest,
+    authorization: str = Header(...),
+) -> dict:
+    """Create or update this tenant's overlay for one metric.
+
+    Validates by compiling the overlay's SQL through the engine — same
+    SELECT-only + allowed-tables guard the canonical metrics get. Bad SQL
+    returns 400 with the validator's reason; nothing is persisted on failure.
+    """
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    tenant_id = _require_tenant(user)
+
+    from semantic_layer.engine import (
+        SqlSafetyError,
+        compile_sql,
+        load_canonical,
+        resolve,
+    )
+    from semantic_layer.models import OverlayMetric
+    from datetime import date
+    import tenant_store
+
+    canonical = load_canonical()
+    if metric_id not in canonical.metrics:
+        raise HTTPException(status_code=404, detail=f"Unknown metric: {metric_id}")
+
+    # Build a candidate Tenant with just this overlay to validate end-to-end.
+    candidate_overlay = OverlayMetric(
+        canonical_id=metric_id,
+        owner=request.owner or "Unknown",
+        last_reviewed=(
+            date.fromisoformat(request.last_reviewed)
+            if request.last_reviewed
+            else date.today()
+        ),
+        diff_description=request.diff_description,
+        measure_sql=request.measure_sql,
+    )
+    from semantic_layer.models import Glossary, Tenant
+    candidate_tenant = Tenant(
+        id=tenant_id,
+        display_name=tenant_id,
+        overlays={metric_id: candidate_overlay},
+        glossary=Glossary(synonyms={}),
+    )
+
+    try:
+        merged = resolve(canonical, candidate_tenant, metric_id)
+        from chat_engine import _database
+        compile_sql(merged, filters=[], dimensions=[], database=_database)
+    except SqlSafetyError as e:
+        raise HTTPException(status_code=400, detail=f"SQL safety violation: {e}") from e
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to compile overlay: {e}") from e
+
+    # Validation passed — persist.
+    persisted = tenant_store.put_overlay(
+        tenant_id=tenant_id,
+        metric_id=metric_id,
+        measure_sql=request.measure_sql,
+        diff_description=request.diff_description,
+        owner=request.owner or "Unknown",
+        updated_by=user.get("sub", "unknown"),
+        last_reviewed=request.last_reviewed,
+    )
+    logger.info(
+        "Overlay saved: tenant=%s metric=%s by=%s", tenant_id, metric_id, user.get("sub")
+    )
+    return {
+        "tenant_id": tenant_id,
+        "metric_id": metric_id,
+        "overlay": {
+            "owner": persisted.owner,
+            "last_reviewed": persisted.last_reviewed.isoformat(),
+            "diff_description": persisted.diff_description,
+            "measure_sql": persisted.measure_sql,
+        },
+    }
+
+
+@app.delete("/api/v1/admin/overlay/{metric_id}")
+async def admin_delete_overlay(
+    metric_id: str,
+    authorization: str = Header(...),
+) -> dict:
+    """Remove this tenant's overlay for one metric. Canonical applies after."""
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    tenant_id = _require_tenant(user)
+
+    import tenant_store
+    tenant_store.delete_overlay(tenant_id, metric_id)
+    logger.info(
+        "Overlay deleted: tenant=%s metric=%s by=%s",
+        tenant_id, metric_id, user.get("sub"),
+    )
+    return {"tenant_id": tenant_id, "metric_id": metric_id, "overlay": None}
 
 
 # =============================================================================

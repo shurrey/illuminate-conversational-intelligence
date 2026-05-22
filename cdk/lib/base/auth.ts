@@ -11,6 +11,11 @@ export interface AuthProps {
   initialUserPassword?: string;
   /** Display name for the initial admin user. */
   initialUserName?: string;
+  /**
+   * Tenant id stamped on the initial user. Drives per-tenant overlay lookup
+   * in the API. Defaults to "blackboard-dev" if not set.
+   */
+  initialTenantId?: string;
 }
 
 export class Auth extends Construct {
@@ -34,6 +39,11 @@ export class Auth extends Construct {
       standardAttributes: {
         email: { required: true, mutable: false },
       },
+      // Custom attribute: tenant_id selects which overlay applies to this
+      // user's queries. Mutable so admins can re-tenant a user later.
+      customAttributes: {
+        tenant_id: new cognito.StringAttribute({ minLen: 1, maxLen: 64, mutable: true }),
+      },
     });
 
     // Set UserPoolTier to LITE (not exposed in L2 construct)
@@ -52,6 +62,8 @@ export class Auth extends Construct {
 
     // Create initial admin user on first deploy (idempotent — ignores if user exists)
     if (props.initialUserEmail && props.initialUserPassword) {
+      const tenantId = props.initialTenantId ?? 'blackboard-dev';
+
       const createUser = new cr.AwsCustomResource(this, 'InitialUser', {
         onCreate: {
           service: 'CognitoIdentityServiceProvider',
@@ -62,6 +74,7 @@ export class Auth extends Construct {
             UserAttributes: [
               { Name: 'email', Value: props.initialUserEmail },
               { Name: 'email_verified', Value: 'true' },
+              { Name: 'custom:tenant_id', Value: tenantId },
               ...(props.initialUserName
                 ? [{ Name: 'name', Value: props.initialUserName }]
                 : []),
@@ -79,6 +92,42 @@ export class Auth extends Construct {
           }),
         ]),
       });
+
+      // Backfill: ensure the tenant_id attribute is set even on existing users
+      // (the InitialUser resource above no-ops if the user already exists).
+      const setTenantId = new cr.AwsCustomResource(this, 'InitialUserTenantId', {
+        onCreate: {
+          service: 'CognitoIdentityServiceProvider',
+          action: 'adminUpdateUserAttributes',
+          parameters: {
+            UserPoolId: this.userPool.userPoolId,
+            Username: props.initialUserEmail,
+            UserAttributes: [{ Name: 'custom:tenant_id', Value: tenantId }],
+          },
+          physicalResourceId: cr.PhysicalResourceId.of(
+            `initial-user-tenant-${props.initialUserEmail}-${tenantId}`,
+          ),
+        },
+        onUpdate: {
+          service: 'CognitoIdentityServiceProvider',
+          action: 'adminUpdateUserAttributes',
+          parameters: {
+            UserPoolId: this.userPool.userPoolId,
+            Username: props.initialUserEmail,
+            UserAttributes: [{ Name: 'custom:tenant_id', Value: tenantId }],
+          },
+          physicalResourceId: cr.PhysicalResourceId.of(
+            `initial-user-tenant-${props.initialUserEmail}-${tenantId}`,
+          ),
+        },
+        policy: cr.AwsCustomResourcePolicy.fromStatements([
+          new iam.PolicyStatement({
+            actions: ['cognito-idp:AdminUpdateUserAttributes'],
+            resources: [this.userPool.userPoolArn],
+          }),
+        ]),
+      });
+      setTenantId.node.addDependency(createUser);
 
       // Set the permanent password (moves user from FORCE_CHANGE_PASSWORD to CONFIRMED)
       const setPassword = new cr.AwsCustomResource(this, 'InitialUserPassword', {
