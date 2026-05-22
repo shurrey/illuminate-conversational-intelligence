@@ -41,8 +41,10 @@ export class Auth extends Construct {
       },
       // Custom attribute: tenant_id selects which overlay applies to this
       // user's queries. Mutable so admins can re-tenant a user later.
+      // MaxLen=256 matches the existing pool's schema; Cognito custom
+      // attributes are immutable once added, so this must not drift.
       customAttributes: {
-        tenant_id: new cognito.StringAttribute({ minLen: 1, maxLen: 64, mutable: true }),
+        tenant_id: new cognito.StringAttribute({ minLen: 1, maxLen: 256, mutable: true }),
       },
     });
 
