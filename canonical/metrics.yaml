@@ -328,3 +328,412 @@ metrics:
     example_questions:
       - "Which courses have the highest completion rate?"
       - "What's our pass rate by course?"
+
+  # ============================================================================
+  # Dashboard metrics — single-row "current vs previous window" comparisons,
+  # consumed by the KPI cards on the POC frontend. Output shape per metric:
+  # one row with `current_*`, `previous_*`, and a diff/delta column. Ported
+  # 1:1 from src/data/dashboardCards.ts in illuminate-poc-frontend. Schema
+  # references use the Snowflake connection's default database (no
+  # {{ database }} prefix), matching the existing dashboard_query endpoint.
+  # ============================================================================
+
+  - id: metric.dashboard.active_students.v1
+    version: "1.0.0"
+    display_name: Active Students (current vs previous term)
+    description: >
+      Distinct students enrolled (STUDENT_IND = TRUE, ACTIVE = '1') in courses
+      belonging to the currently running academic term(s), compared to the most
+      recently completed prior term. Returns current/previous counts and an
+      absolute + percentage change. Originally the `total-enrollment` card.
+    owner: "Blackboard"
+    authority: vendor-canonical
+    last_reviewed: 2026-05-22
+    entity: Person
+    originally: "dashboard card: total-enrollment"
+    measure_sql: |
+      WITH current_terms AS (
+        SELECT ID
+        FROM CDM_LMS.TERM
+        WHERE ROW_DELETED_TIME IS NULL
+          AND START_TIME IS NOT NULL
+          AND END_TIME IS NOT NULL
+          AND CURRENT_TIMESTAMP() BETWEEN START_TIME AND END_TIME
+      ),
+      previous_terms AS (
+        SELECT ID
+        FROM CDM_LMS.TERM
+        WHERE ROW_DELETED_TIME IS NULL
+          AND END_TIME IS NOT NULL
+          AND END_TIME < (SELECT MIN(START_TIME) FROM CDM_LMS.TERM
+                          WHERE ID IN (SELECT ID FROM current_terms))
+        QUALIFY ROW_NUMBER() OVER (ORDER BY END_TIME DESC) = 1
+      ),
+      current_students AS (
+        SELECT COUNT(DISTINCT pc.PERSON_ID) AS student_count
+        FROM CDM_LMS.PERSON_COURSE pc
+        JOIN CDM_LMS.COURSE c
+          ON c.ID = pc.COURSE_ID AND c.ROW_DELETED_TIME IS NULL
+        WHERE c.TERM_ID IN (SELECT ID FROM current_terms)
+          AND pc.STUDENT_IND = TRUE
+          AND pc.ACTIVE = '1'
+          AND pc.ROW_DELETED_TIME IS NULL
+      ),
+      previous_students AS (
+        SELECT COUNT(DISTINCT pc.PERSON_ID) AS student_count
+        FROM CDM_LMS.PERSON_COURSE pc
+        JOIN CDM_LMS.COURSE c
+          ON c.ID = pc.COURSE_ID AND c.ROW_DELETED_TIME IS NULL
+        WHERE c.TERM_ID IN (SELECT ID FROM previous_terms)
+          AND pc.STUDENT_IND = TRUE
+          AND pc.ACTIVE = '1'
+          AND pc.ROW_DELETED_TIME IS NULL
+      )
+      SELECT
+        cs.student_count AS current_term_students,
+        ps.student_count AS previous_term_students,
+        cs.student_count - ps.student_count AS change_abs,
+        ROUND(
+          (cs.student_count - ps.student_count) * 100.0
+          / NULLIF(ps.student_count, 0),
+          2
+        ) AS change_pct
+      FROM current_students cs
+      CROSS JOIN previous_students ps
+    default_filters: []
+    valid_dimensions: []
+    synonyms: ["active students", "term-over-term enrollment"]
+    example_questions:
+      - "How many active students do we have this term vs last?"
+
+  - id: metric.dashboard.retention_rate.v1
+    version: "1.0.0"
+    display_name: Retention Rate (rolling 90-day windows)
+    description: >
+      Percentage of students who enrolled in the previous 90-day window and
+      returned for the current 90-day window. Uses rolling windows rather than
+      academic terms. Originally the `retention-rate` card.
+    owner: "Blackboard"
+    authority: vendor-canonical
+    last_reviewed: 2026-05-22
+    entity: Person
+    originally: "dashboard card: retention-rate"
+    measure_sql: |
+      WITH windowed_enrollments AS (
+        SELECT DISTINCT
+          CASE
+            WHEN pc.ENROLLMENT_TIME >= DATEADD('day', -90,  CURRENT_TIMESTAMP()) THEN 0
+            WHEN pc.ENROLLMENT_TIME >= DATEADD('day', -180, CURRENT_TIMESTAMP()) THEN 1
+            WHEN pc.ENROLLMENT_TIME >= DATEADD('day', -270, CURRENT_TIMESTAMP()) THEN 2
+          END AS window_rank,
+          pc.PERSON_ID
+        FROM CDM_LMS.PERSON_COURSE pc
+        WHERE pc.STUDENT_IND = TRUE
+          AND pc.ROW_DELETED_TIME IS NULL
+          AND pc.ENROLLMENT_TIME >= DATEADD('day', -270, CURRENT_TIMESTAMP())
+      ),
+      window_totals AS (
+        SELECT window_rank, COUNT(DISTINCT PERSON_ID) AS student_count
+        FROM windowed_enrollments
+        GROUP BY window_rank
+      ),
+      retention AS (
+        SELECT
+          later.window_rank AS later_rank,
+          COUNT(DISTINCT later.PERSON_ID) AS retained_students
+        FROM windowed_enrollments later
+        JOIN windowed_enrollments earlier
+          ON later.PERSON_ID = earlier.PERSON_ID
+         AND earlier.window_rank = later.window_rank + 1
+        WHERE later.window_rank IN (0, 1)
+        GROUP BY later.window_rank
+      ),
+      rates AS (
+        SELECT
+          r.later_rank,
+          ROUND(r.retained_students * 100.0 / NULLIF(earlier.student_count, 0), 2) AS retention_pct
+        FROM retention r
+        JOIN window_totals earlier ON earlier.window_rank = r.later_rank + 1
+      )
+      SELECT
+        MAX(CASE WHEN later_rank = 0 THEN retention_pct END) AS current_retention_pct,
+        MAX(CASE WHEN later_rank = 1 THEN retention_pct END) AS previous_retention_pct,
+        ROUND(
+          MAX(CASE WHEN later_rank = 0 THEN retention_pct END)
+          - MAX(CASE WHEN later_rank = 1 THEN retention_pct END),
+          2
+        ) AS retention_pct_diff
+      FROM rates
+    default_filters: []
+    valid_dimensions: []
+    synonyms: ["retention", "term-over-term retention"]
+    example_questions:
+      - "What's our retention rate this window vs last?"
+
+  - id: metric.dashboard.platform_engagement.v1
+    version: "1.0.0"
+    display_name: Platform Engagement (last 7 days)
+    description: >
+      Percentage of actively enrolled students who accessed the LMS platform
+      within the last 7 days, anchored on the latest observed access time,
+      compared to the prior 7-day window. Originally the `platform-engagement`
+      card.
+    owner: "Blackboard"
+    authority: vendor-canonical
+    last_reviewed: 2026-05-22
+    entity: Person
+    originally: "dashboard card: platform-engagement"
+    measure_sql: |
+      WITH active_students AS (
+        SELECT DISTINCT pc.PERSON_ID
+        FROM CDM_LMS.PERSON_COURSE pc
+        JOIN CDM_LMS.COURSE c
+          ON c.ID = pc.COURSE_ID
+         AND c.ROW_DELETED_TIME IS NULL
+        JOIN CDM_LMS.TERM t
+          ON t.ID = c.TERM_ID
+         AND t.ROW_DELETED_TIME IS NULL
+        WHERE pc.STUDENT_IND = TRUE
+          AND pc.ROW_DELETED_TIME IS NULL
+          AND t.START_TIME IS NOT NULL
+          AND t.END_TIME IS NOT NULL
+          AND CURRENT_TIMESTAMP() BETWEEN t.START_TIME AND t.END_TIME
+      ),
+      as_of AS (
+        SELECT MAX(ACCESSED_TIME) AS anchor_time
+        FROM CDM_LMS.ACTIVITY
+        WHERE ROW_DELETED_TIME IS NULL
+      ),
+      engaged_current AS (
+        SELECT COUNT(DISTINCT a.PERSON_ID) AS engaged_count
+        FROM CDM_LMS.ACTIVITY a
+        JOIN active_students s ON s.PERSON_ID = a.PERSON_ID
+        CROSS JOIN as_of
+        WHERE a.ROW_DELETED_TIME IS NULL
+          AND a.ACCESSED_TIME >  DATEADD('day', -7, as_of.anchor_time)
+          AND a.ACCESSED_TIME <= as_of.anchor_time
+      ),
+      engaged_previous AS (
+        SELECT COUNT(DISTINCT a.PERSON_ID) AS engaged_count
+        FROM CDM_LMS.ACTIVITY a
+        JOIN active_students s ON s.PERSON_ID = a.PERSON_ID
+        CROSS JOIN as_of
+        WHERE a.ROW_DELETED_TIME IS NULL
+          AND a.ACCESSED_TIME >  DATEADD('day', -14, as_of.anchor_time)
+          AND a.ACCESSED_TIME <= DATEADD('day', -7,  as_of.anchor_time)
+      ),
+      denom AS (
+        SELECT COUNT(*) AS total FROM active_students
+      )
+      SELECT
+        ROUND(ec.engaged_count * 100.0 / NULLIF(d.total, 0), 2) AS current_engagement_pct,
+        ROUND(ep.engaged_count * 100.0 / NULLIF(d.total, 0), 2) AS previous_engagement_pct,
+        ROUND(
+          (ec.engaged_count * 100.0 / NULLIF(d.total, 0))
+          - (ep.engaged_count * 100.0 / NULLIF(d.total, 0)),
+          2
+        ) AS engagement_pct_diff
+      FROM engaged_current ec
+      CROSS JOIN engaged_previous ep
+      CROSS JOIN denom d
+    default_filters: []
+    valid_dimensions: []
+    synonyms: ["platform engagement", "student activity", "login activity"]
+    example_questions:
+      - "How engaged are students with the platform this week?"
+
+  - id: metric.dashboard.active_courses.v1
+    version: "1.0.0"
+    display_name: Active Courses (with activity this week)
+    description: >
+      Distinct available courses in currently running terms with at least one
+      student access event in the last 7 days, compared to the prior 7-day
+      window. Originally the `active-courses` card.
+    owner: "Blackboard"
+    authority: vendor-canonical
+    last_reviewed: 2026-05-22
+    entity: Course
+    originally: "dashboard card: active-courses"
+    measure_sql: |
+      WITH active_courses AS (
+        SELECT c.ID AS course_id
+        FROM CDM_LMS.COURSE c
+        JOIN CDM_LMS.TERM t
+          ON t.ID = c.TERM_ID
+         AND t.ROW_DELETED_TIME IS NULL
+        WHERE c.ROW_DELETED_TIME IS NULL
+          AND c.AVAILABLE_IND = TRUE
+          AND t.START_TIME IS NOT NULL
+          AND t.END_TIME IS NOT NULL
+          AND CURRENT_TIMESTAMP() BETWEEN t.START_TIME AND t.END_TIME
+      ),
+      as_of AS (
+        SELECT MAX(ACCESSED_TIME) AS anchor_time
+        FROM CDM_LMS.ACTIVITY
+        WHERE ROW_DELETED_TIME IS NULL
+      ),
+      active_current AS (
+        SELECT COUNT(DISTINCT a.COURSE_ID) AS course_count
+        FROM CDM_LMS.ACTIVITY a
+        JOIN active_courses ac ON ac.course_id = a.COURSE_ID
+        CROSS JOIN as_of
+        WHERE a.ROW_DELETED_TIME IS NULL
+          AND a.ACCESSED_TIME >  DATEADD('day', -7, as_of.anchor_time)
+          AND a.ACCESSED_TIME <= as_of.anchor_time
+      ),
+      active_previous AS (
+        SELECT COUNT(DISTINCT a.COURSE_ID) AS course_count
+        FROM CDM_LMS.ACTIVITY a
+        JOIN active_courses ac ON ac.course_id = a.COURSE_ID
+        CROSS JOIN as_of
+        WHERE a.ROW_DELETED_TIME IS NULL
+          AND a.ACCESSED_TIME >  DATEADD('day', -14, as_of.anchor_time)
+          AND a.ACCESSED_TIME <= DATEADD('day', -7,  as_of.anchor_time)
+      )
+      SELECT
+        ac.course_count AS current_active_courses,
+        ap.course_count AS previous_active_courses,
+        ac.course_count - ap.course_count AS active_courses_diff
+      FROM active_current ac
+      CROSS JOIN active_previous ap
+    default_filters: []
+    valid_dimensions: []
+    synonyms: ["courses with activity", "active courses this week"]
+    example_questions:
+      - "How many courses have student activity this week?"
+
+  - id: metric.dashboard.instructor_engagement.v1
+    version: "1.0.0"
+    display_name: Instructor Engagement (grading activity this week)
+    description: >
+      Percentage of active courses where a primary instructor (role 'P') or
+      teaching assistant (role 'T') manually entered at least one grade in the
+      last 7 days, compared to the prior 7-day window. Originally the
+      `instructor-engagement` card.
+    owner: "Blackboard"
+    authority: vendor-canonical
+    last_reviewed: 2026-05-22
+    entity: Course
+    originally: "dashboard card: instructor-engagement"
+    measure_sql: |
+      WITH active_courses AS (
+        SELECT c.ID AS course_id
+        FROM CDM_LMS.COURSE c
+        JOIN CDM_LMS.TERM t
+          ON t.ID = c.TERM_ID
+         AND t.ROW_DELETED_TIME IS NULL
+        WHERE c.ROW_DELETED_TIME IS NULL
+          AND (c.AVAILABLE_IND = TRUE OR c.AVAILABLE_TO_STUDENTS_IND = TRUE)
+          AND t.START_TIME IS NOT NULL
+          AND t.END_TIME IS NOT NULL
+          AND CURRENT_TIMESTAMP() BETWEEN t.START_TIME AND t.END_TIME
+      ),
+      as_of AS (
+        SELECT MAX(LAST_GRADED_TIME) AS anchor_time
+        FROM CDM_LMS.GRADE
+        WHERE ROW_DELETED_TIME IS NULL
+      ),
+      instructor_grading AS (
+        SELECT
+          pc.COURSE_ID,
+          g.LAST_GRADED_TIME
+        FROM CDM_LMS.GRADE g
+        JOIN CDM_LMS.PERSON_COURSE pc
+          ON pc.ID = g.PERSON_COURSE_ID
+         AND pc.ROW_DELETED_TIME IS NULL
+        WHERE g.ROW_DELETED_TIME IS NULL
+          AND g.MANUAL_IND = TRUE
+          AND g.MODIFIER_ROLE IN ('P', 'T')
+          AND g.LAST_GRADED_TIME IS NOT NULL
+      ),
+      engaged_current AS (
+        SELECT COUNT(DISTINCT ig.COURSE_ID) AS course_count
+        FROM instructor_grading ig
+        JOIN active_courses ac ON ac.course_id = ig.COURSE_ID
+        CROSS JOIN as_of
+        WHERE ig.LAST_GRADED_TIME >  DATEADD('day', -7, as_of.anchor_time)
+          AND ig.LAST_GRADED_TIME <= as_of.anchor_time
+      ),
+      engaged_previous AS (
+        SELECT COUNT(DISTINCT ig.COURSE_ID) AS course_count
+        FROM instructor_grading ig
+        JOIN active_courses ac ON ac.course_id = ig.COURSE_ID
+        CROSS JOIN as_of
+        WHERE ig.LAST_GRADED_TIME >  DATEADD('day', -14, as_of.anchor_time)
+          AND ig.LAST_GRADED_TIME <= DATEADD('day', -7,  as_of.anchor_time)
+      ),
+      denom AS (
+        SELECT COUNT(*) AS total FROM active_courses
+      )
+      SELECT
+        ROUND(ec.course_count * 100.0 / NULLIF(d.total, 0), 2) AS current_engagement_pct,
+        ROUND(ep.course_count * 100.0 / NULLIF(d.total, 0), 2) AS previous_engagement_pct,
+        ROUND(
+          (ec.course_count * 100.0 / NULLIF(d.total, 0))
+          - (ep.course_count * 100.0 / NULLIF(d.total, 0)),
+          2
+        ) AS engagement_pct_diff
+      FROM engaged_current ec
+      CROSS JOIN engaged_previous ep
+      CROSS JOIN denom d
+    default_filters: []
+    valid_dimensions: []
+    synonyms: ["instructor engagement", "instructor grading", "RSI compliance"]
+    example_questions:
+      - "How many instructors have graded this week?"
+
+  - id: metric.dashboard.classic_holdouts.v1
+    version: "1.0.0"
+    display_name: Classic Courses Still Active
+    description: >
+      Original Experience (DESIGN_MODE = 'C') courses with activity in the
+      last 7 days, compared to the prior 7-day window. Tracks the Classic
+      sunset; lower is better (invert_trend = true on the dashboard).
+      Originally the `classic-holdouts` card.
+    owner: "Blackboard"
+    authority: vendor-canonical
+    last_reviewed: 2026-05-22
+    entity: Course
+    originally: "dashboard card: classic-holdouts"
+    measure_sql: |
+      WITH classic_courses AS (
+        SELECT c.ID AS course_id
+        FROM CDM_LMS.COURSE c
+        WHERE c.ROW_DELETED_TIME IS NULL
+          AND (c.AVAILABLE_IND = TRUE OR c.AVAILABLE_TO_STUDENTS_IND = TRUE)
+          AND c.DESIGN_MODE = 'C'
+      ),
+      as_of AS (
+        SELECT MAX(LAST_ACCESSED_TIME) AS anchor_time
+        FROM CDM_LMS.COURSE_ACTIVITY
+        WHERE ROW_DELETED_TIME IS NULL
+      ),
+      current_window AS (
+        SELECT COUNT(DISTINCT ca.COURSE_ID) AS classic_course_count
+        FROM CDM_LMS.COURSE_ACTIVITY ca
+        JOIN classic_courses cc ON cc.course_id = ca.COURSE_ID
+        CROSS JOIN as_of
+        WHERE ca.ROW_DELETED_TIME IS NULL
+          AND ca.LAST_ACCESSED_TIME >  DATEADD('day', -7, as_of.anchor_time)
+          AND ca.LAST_ACCESSED_TIME <= as_of.anchor_time
+      ),
+      previous_window AS (
+        SELECT COUNT(DISTINCT ca.COURSE_ID) AS classic_course_count
+        FROM CDM_LMS.COURSE_ACTIVITY ca
+        JOIN classic_courses cc ON cc.course_id = ca.COURSE_ID
+        CROSS JOIN as_of
+        WHERE ca.ROW_DELETED_TIME IS NULL
+          AND ca.LAST_ACCESSED_TIME >  DATEADD('day', -14, as_of.anchor_time)
+          AND ca.LAST_ACCESSED_TIME <= DATEADD('day', -7,  as_of.anchor_time)
+      )
+      SELECT
+        cw.classic_course_count AS current_classic_courses,
+        pw.classic_course_count AS previous_classic_courses,
+        cw.classic_course_count - pw.classic_course_count AS classic_courses_diff
+      FROM current_window cw
+      CROSS JOIN previous_window pw
+    default_filters: []
+    valid_dimensions: []
+    synonyms: ["classic courses", "original experience holdouts"]
+    example_questions:
+      - "How many Classic courses still have activity?"
