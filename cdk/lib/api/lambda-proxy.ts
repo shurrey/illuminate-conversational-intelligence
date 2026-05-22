@@ -106,6 +106,9 @@ export class LambdaProxy extends Construct {
               'pip install -q -t /asset-output --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: -r requirements-lambda.txt',
               'cp lambda_handler.py chat_engine.py conversation_store.py snowflake_client.py run.sh /asset-output/',
               'cp verified_queries.json /asset-output/ 2>/dev/null || true',
+              // Semantic layer: ship the package + canonical metric YAML
+              'cp -r semantic_layer /asset-output/',
+              'cp -r canonical /asset-output/',
             ].join(' && '),
           ],
         },
