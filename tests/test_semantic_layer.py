@@ -33,10 +33,11 @@ DUMMY_DATABASE = "ILLUMINATE_TEST"
 # ---------------------------------------------------------------------------
 
 
-def test_canonical_catalog_loads_twelve_metrics():
+def test_canonical_catalog_loads_eighteen_metrics():
     cat = load_canonical()
-    assert len(cat.metrics) == 12
+    assert len(cat.metrics) == 18
     expected_ids = {
+        # Chat-shaped metrics (derived from verified_queries.json)
         "metric.student_count.v1",
         "metric.instructor_count.v1",
         "metric.course_count.v1",
@@ -49,8 +50,31 @@ def test_canonical_catalog_loads_twelve_metrics():
         "metric.average_gpa.for_term.v1",
         "metric.grade_distribution.v1",
         "metric.course_completion_rate.v1",
+        # Dashboard-shaped metrics (current vs previous window comparisons)
+        "metric.dashboard.active_students.v1",
+        "metric.dashboard.retention_rate.v1",
+        "metric.dashboard.platform_engagement.v1",
+        "metric.dashboard.active_courses.v1",
+        "metric.dashboard.instructor_engagement.v1",
+        "metric.dashboard.classic_holdouts.v1",
     }
     assert set(cat.metrics.keys()) == expected_ids
+
+
+def test_dashboard_metrics_compile_with_ctes():
+    """Dashboard metric SQL uses CTEs heavily. sqlglot exposes CTE references
+    as Table nodes; the engine must exclude CTE-defined names from the
+    allowed-tables check or every dashboard metric fails safety validation."""
+    cat = load_canonical()
+    dashboard_ids = [mid for mid in cat.metrics if mid.startswith("metric.dashboard.")]
+    assert len(dashboard_ids) == 6
+    for mid in dashboard_ids:
+        merged = resolve(cat, None, mid)
+        sql = compile_sql(merged, filters=[], dimensions=[], database=DUMMY_DATABASE)
+        # All dashboard metrics return a single row with current/previous/diff
+        # columns. The SQL is a WITH ... SELECT structure.
+        upper = sql.strip().upper()
+        assert upper.startswith("WITH"), f"{mid} not a CTE query"
 
 
 def test_every_metric_owner_is_blackboard():
@@ -79,7 +103,12 @@ def test_every_metric_synonym_routes_via_glossary():
 
 def test_all_metrics_compile_to_safe_snowflake_select():
     """Every canonical metric must render via Jinja, parse as a SELECT/CTE,
-    reference only CDM_LMS allowed tables, and end up with a LIMIT clause."""
+    reference only CDM_LMS allowed tables, and end up with a LIMIT clause.
+
+    Chat-shaped metrics template the database name via `{{ database }}`;
+    dashboard-shaped metrics rely on the Snowflake connection's default
+    database (no prefix), so the substitution check is conditional.
+    """
     cat = load_canonical()
     for mid, m in cat.metrics.items():
         merged = resolve(cat, None, mid)
@@ -89,8 +118,13 @@ def test_all_metrics_compile_to_safe_snowflake_select():
             f"{mid} did not produce a SELECT/CTE statement"
         )
         assert "LIMIT" in upper, f"{mid} missing LIMIT"
-        # Database substitution actually happened
-        assert DUMMY_DATABASE in sql, f"{mid} did not substitute {{ database }}"
+        # Only chat metrics substitute the database name; dashboard metrics
+        # use the connection's default. Distinguish by checking whether the
+        # template references `{{ database }}`.
+        if "{{ database }}" in m.measure_sql or "{{database}}" in m.measure_sql:
+            assert DUMMY_DATABASE in sql, (
+                f"{mid} templates {{ database }} but didn't substitute"
+            )
 
 
 def test_allowed_tables_covers_all_canonical_references():

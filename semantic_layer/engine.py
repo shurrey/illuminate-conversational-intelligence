@@ -44,6 +44,9 @@ ALLOWED_TABLES = {
     "TERM",
     "PERSON_COURSE",
     "GRADE",
+    # Activity tables used by dashboard metrics
+    "ACTIVITY",
+    "COURSE_ACTIVITY",
 }
 
 
@@ -159,7 +162,11 @@ def _validate_select_only(sql: str) -> None:
         raise SqlSafetyError(
             f"Only SELECT/CTE queries are allowed; got {type(parsed).__name__}"
         )
-    referenced = {t.name.upper() for t in parsed.find_all(exp.Table)}
+    # CTE references inside `FROM` show up as Table nodes whose name is the
+    # CTE alias. Exclude those from the allowlist check — only real warehouse
+    # tables should be gated.
+    cte_names = {cte.alias_or_name.upper() for cte in parsed.find_all(exp.CTE)}
+    referenced = {t.name.upper() for t in parsed.find_all(exp.Table)} - cte_names
     bad = referenced - ALLOWED_TABLES
     if bad:
         raise SqlSafetyError(f"Disallowed tables referenced: {sorted(bad)}")

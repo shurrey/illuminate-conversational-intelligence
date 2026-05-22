@@ -705,6 +705,16 @@ class DashboardQueryRequest(BaseModel):
     params: Optional[dict] = None
 
 
+class DashboardMetricRequest(BaseModel):
+    """Request body for canonical-metric-backed dashboard queries.
+
+    The frontend ships a `metric_id` that resolves to a vetted SQL template in
+    `canonical/metrics.yaml`. The backend compiles it (applying any tenant
+    overlay — none in MVP) and executes against Snowflake.
+    """
+    metric_id: str
+
+
 @app.post("/api/v1/dashboard/query")
 async def dashboard_query(
     request: DashboardQueryRequest,
@@ -738,6 +748,71 @@ async def dashboard_query(
     except Exception as e:
         logger.error(f"Dashboard query failed: {e}")
         return {"error": str(e)}
+
+
+@app.post("/api/v1/dashboard/metric")
+async def dashboard_metric(
+    request: DashboardMetricRequest,
+    authorization: str = Header(...),
+):
+    """Execute a canonical metric for a dashboard widget.
+
+    Same response shape as /api/v1/dashboard/query (`{columns, rows}`) so the
+    frontend `useDashboardCards` hook needs no result-side changes. Returns
+    `{error}` on validation failure or unknown metric_id.
+    """
+    user = _get_user_from_token(authorization)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    # Lazy import — the semantic_layer package and its YAML are only loaded
+    # when the endpoint is hit, so Lambda cold start is not affected for the
+    # chat path. chat_engine.py separately imports semantic_layer at module
+    # top to inject the catalog summary into the system prompt; that import
+    # has already happened by the time this endpoint fires.
+    from semantic_layer.engine import (
+        SqlSafetyError,
+        compile_sql,
+        load_canonical,
+        resolve,
+    )
+
+    canonical = load_canonical()
+    if request.metric_id not in canonical.metrics:
+        return {
+            "error": f"unknown metric_id: {request.metric_id!r}",
+            "available_metrics": sorted(canonical.metrics.keys()),
+        }
+
+    # No tenant overlays yet — Step 4 will wire Cognito tenant claims through.
+    try:
+        merged = resolve(canonical, None, request.metric_id)
+        # Resolve the database from chat_engine (already computed at import).
+        from chat_engine import _database
+        sql = compile_sql(
+            merged, filters=[], dimensions=[], database=_database
+        )
+    except SqlSafetyError as e:
+        return {"error": f"SQL safety violation in metric definition: {e}"}
+    except KeyError as e:
+        return {"error": f"failed to resolve metric: {e}"}
+
+    try:
+        import asyncio
+        from snowflake_client import query_sql
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, lambda: query_sql(sql, params=None))
+        logger.info(
+            "Dashboard metric %s returned %d rows",
+            request.metric_id, len(result.get("rows", [])),
+        )
+        return result
+    except ValueError as e:
+        return {"error": str(e), "sql_attempted": sql}
+    except Exception as e:
+        logger.error(f"Dashboard metric {request.metric_id} failed: {e}")
+        return {"error": str(e), "sql_attempted": sql}
 
 
 # =============================================================================
