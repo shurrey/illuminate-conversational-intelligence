@@ -1,0 +1,3 @@
+# Dev-only deps; not deployed to Lambda. Install with:
+#   pip install -r requirements-lambda.txt -r requirements-dev.txt
+pytest>=8.0.0
