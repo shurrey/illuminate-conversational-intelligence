@@ -90,10 +90,15 @@ export class LambdaProxy extends Construct {
       ],
     }));
 
-    // Build CORS allowed origins
+    // Build CORS allowed origins.
+    // Dev includes the existing CloudFront distribution URL inline — the
+    // frontend stack's AddCorsOrigin custom resource was supposed to append
+    // this dynamically but only read the config, never wrote. Hardcoding
+    // here is more reliable than a buggy custom resource and the URL is
+    // stable for the lifetime of the IlluminatePoc stack.
     const defaultOrigins = isProd
       ? 'https://illuminate.anthology.com'
-      : 'http://localhost:3000,http://localhost:5173';
+      : 'http://localhost:3000,http://localhost:5173,https://dm5zbussw00dg.cloudfront.net';
     const allowedOrigins = props.frontendOrigin
       ? `${defaultOrigins},${props.frontendOrigin}`
       : defaultOrigins;
